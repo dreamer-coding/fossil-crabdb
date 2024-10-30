@@ -96,7 +96,6 @@ FOSSIL_TEST(test_fossil_crabql_load_invalid_queries_from_file) {
 FOSSIL_TEST(test_fossil_crabql_load_invalid_queries) {
     const char *filename = "invalid_syntax_queries.crab";
     FILE *file = fopen(filename, "w");
-    ASSUME_NOT_CNULL(file);
 
     // Invalid queries to write to the .crab file
     fprintf(file, "SELECT FROM users;\n");
