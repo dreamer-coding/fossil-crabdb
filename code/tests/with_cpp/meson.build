@@ -1,4 +1,3 @@
-cpp_test_src = ['unit_runner.cpp']
 cpp_test_cubes = [
     'crabdb', 'crabql', 'crabsearch', 'crabsync'
 ]

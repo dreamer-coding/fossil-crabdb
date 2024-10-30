@@ -1,4 +1,3 @@
-c_test_src = ['unit_runner.c']
 c_test_cubes = [
     'crabdb', 'crabql', 'crabsearch', 'crabsync'
 ]
