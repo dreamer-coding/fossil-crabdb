@@ -17,6 +17,8 @@
 
 #include "fossil/crabdb/framework.h"
 
+using namespace fossil;
+
 // * * * * * * * * * * * * * * * * * * * * * * * *
 // * Fossil Logic Test Blue CrabDB Database
 // * * * * * * * * * * * * * * * * * * * * * * * *

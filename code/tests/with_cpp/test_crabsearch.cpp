@@ -17,6 +17,8 @@
 
 #include "fossil/crabdb/framework.h"
 
+using namespace fossil;
+
 FOSSIL_FIXTURE(search_fixture);
 fossil_crabdb_t *search_mock_db;
 
