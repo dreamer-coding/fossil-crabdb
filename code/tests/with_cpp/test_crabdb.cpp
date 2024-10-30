@@ -17,6 +17,7 @@
 
 #include "fossil/crabdb/framework.h"
 
+// note to add cases for the C++ class CrabDB
 
 // * * * * * * * * * * * * * * * * * * * * * * * *
 // * Fossil Logic Test Blue CrabDB Database
