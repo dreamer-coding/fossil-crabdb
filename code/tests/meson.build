@@ -9,7 +9,7 @@ if get_option('with_test').enabled()
     ]
 
     foreach cube : c_test_cubes
-        c_test_src += ['test_' + cube + '.c']
+        c_test_src += ['with_c' / 'test_' + cube + '.c']
     endforeach
 
     c_pizza = executable('runner-c', c_test_src,
@@ -24,7 +24,7 @@ if get_option('with_test').enabled()
     ]
 
     foreach cube : cpp_test_cubes
-        cpp_test_src += ['test_' + cube + '.cpp']
+        cpp_test_src += ['with_cpp' / 'test_' + cube + '.cpp']
     endforeach
 
     cpp_pizza = executable('runner-cpp', cpp_test_src,
