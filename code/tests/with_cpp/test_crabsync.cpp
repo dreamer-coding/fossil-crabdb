@@ -19,6 +19,7 @@
 
 using namespace fossil;
 
+
 FOSSIL_FIXTURE(crabsync_fixture);
 fossil_crabsync_t *sync_mock;
 
