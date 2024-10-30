@@ -3,7 +3,7 @@ cpp_test_cubes = [
     'crabdb', 'crabql', 'crabsearch', 'crabsync'
 ]
 
-foreach cube : test_cubes
+foreach cube : cpp_test_cubes
     cpp_test_src += ['test_' + cube + '.cpp']
 endforeach
 
