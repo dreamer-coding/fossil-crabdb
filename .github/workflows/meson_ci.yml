@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "**.c"
+      - "**.cpp"
       - "**.h"
       - "**.kt"
       - "**.py"
@@ -11,6 +12,7 @@ on:
   pull_request:
     paths:
       - "**.c"
+      - "**.cpp"
       - "**.h"
       - "**.kt"
       - "**.py"
