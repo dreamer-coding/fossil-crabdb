@@ -7,7 +7,7 @@ foreach cube : c_test_cubes
     c_test_src += ['test_' + cube + '.c']
 endforeach
 
-c_pizza = executable('runner-c', cpp_test_src,
+c_pizza = executable('runner-c', c_test_src,
     include_directories: dir,
     dependencies: [
         dependency('fossil-test'),
