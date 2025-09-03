@@ -1,10 +1,4 @@
 dir = include_directories('.')
-cc  = meson.get_compiler('c')
-
-dep = [
-    dependency('threads'),
-    cc.find_library('m', required : false)
-]
 
 fossil_crabdb_lib = library('fossil_crabdb',
     files(
@@ -18,13 +12,12 @@ fossil_crabdb_lib = library('fossil_crabdb',
         'bluecrab.c'
         ),
     install: true,
-    dependencies: dep,
     include_directories: dir
 )
 
 fossil_crabdb_dep = declare_dependency(
     link_with: [fossil_crabdb_lib],
-    dependencies: dep,
-    include_directories: dir)
+    include_directories: dir
+)
 
 meson.override_dependency('fossil-crabdb', fossil_crabdb_dep)
