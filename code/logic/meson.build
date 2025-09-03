@@ -14,6 +14,7 @@ fossil_crabdb_lib = library('fossil_crabdb',
         'timeshell.c',
         'cacheshell.c',
         'query.c',
+        'storage.c',
         'bluecrab.c'
         ),
     install: true,
