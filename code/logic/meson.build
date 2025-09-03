@@ -12,7 +12,9 @@ fossil_crabdb_lib = library('fossil_crabdb',
         'noshell.c',
         'fileshell.c',
         'timeshell.c',
-        'cacheshell.c'
+        'cacheshell.c',
+        'query.c',
+        'bluecrab.c'
         ),
     install: true,
     dependencies: dep,
