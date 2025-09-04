@@ -14,58 +14,41 @@
 #ifndef FOSSIL_BLUECRAB_STORE_H
 #define FOSSIL_BLUECRAB_STORE_H
 
+#include "bluecrab.h"
 #include <stddef.h>
-#include <stdint.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// -----------------------------------------------------------------------------
-// Handle
-// -----------------------------------------------------------------------------
-typedef struct fossil_store fossil_store_t;
+typedef struct fossil_bluecrab_storeage fossil_bluecrab_storeage_t;
 
-// -----------------------------------------------------------------------------
-// Open/Close
-// -----------------------------------------------------------------------------
-fossil_store_t* fossil_bluecrab_store_open(const char* path, bool create_if_missing);
-void fossil_bluecrab_store_close(fossil_store_t* store);
+/* Create/destroy a store */
+fossil_bluecrab_storeage_t *fossil_bluecrab_storeage_create(size_t initial_capacity);
+void fossil_bluecrab_storeage_destroy(fossil_bluecrab_storeage_t *st);
 
-// -----------------------------------------------------------------------------
-// Data Operations
-// -----------------------------------------------------------------------------
-bool fossil_bluecrab_store_put(fossil_store_t* store,
-                               const char* key,
-                               const char* value_json);
+/* Insert or update a key-value */
+bool fossil_bluecrab_storeage_set(fossil_bluecrab_storeage_t *st,
+                                  const char *key,
+                                  fossil_bluecrab_type_t tag,
+                                  const fossil_bluecrab_value_t *val);
 
-char* fossil_bluecrab_store_get(fossil_store_t* store,
-                                const char* key);
+/* Get a value by key; returns false if not found */
+bool fossil_bluecrab_storeage_get(fossil_bluecrab_storeage_t *st,
+                                  const char *key,
+                                  fossil_bluecrab_type_t *tag_out,
+                                  fossil_bluecrab_value_t *val_out);
 
-bool fossil_bluecrab_store_remove(fossil_store_t* store,
-                                  const char* key);
+/* Remove a key */
+bool fossil_bluecrab_storeage_remove(fossil_bluecrab_storeage_t *st, const char *key);
 
-size_t fossil_bluecrab_store_count(fossil_store_t* store);
+/* Save/load to file (very simple text format) */
+bool fossil_bluecrab_storeage_save(fossil_bluecrab_storeage_t *st, const char *filename);
+bool fossil_bluecrab_storeage_load(fossil_bluecrab_storeage_t *st, const char *filename);
 
-// -----------------------------------------------------------------------------
-// Integrity
-// -----------------------------------------------------------------------------
-uint64_t fossil_bluecrab_store_hash(const char* data,
-                                    size_t len,
-                                    uint64_t salt,
-                                    uint64_t timestamp);
-
-// -----------------------------------------------------------------------------
-// Iteration
-// -----------------------------------------------------------------------------
-typedef void (*fossil_store_iter_cb)(const char* key,
-                                     const char* value_json,
-                                     void* userdata);
-
-void fossil_bluecrab_store_iterate(fossil_store_t* store,
-                                   fossil_store_iter_cb cb,
-                                   void* userdata);
+/* Count of items */
+size_t fossil_bluecrab_storeage_count(fossil_bluecrab_storeage_t *st);
 
 #ifdef __cplusplus
 }
