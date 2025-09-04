@@ -12,389 +12,470 @@
  * -----------------------------------------------------------------------------
  */
 #include "fossil/crabdb/bluecrab.h"
-#include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#include <time.h>
+#include <stdint.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
+#include <unistd.h> /* for getpid on POSIX; if not available, salt still works */
 
-/* --- creation helpers --- */
 
-void fossil_bluecrab_init(fossil_bluecrab_t *out) {
-    if (!out) return;
-    out->type = FBC_TYPE_NONE;
-    out->v.cstr = NULL;
-}
-
-void fossil_bluecrab_set_i64(fossil_bluecrab_t *out, int64_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_I64;
-    out->v.i64 = val;
-}
-void fossil_bluecrab_set_i32(fossil_bluecrab_t *out, int32_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_I32;
-    out->v.i32 = val;
-}
-void fossil_bluecrab_set_i16(fossil_bluecrab_t *out, int16_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_I16;
-    out->v.i16 = val;
-}
-void fossil_bluecrab_set_i8(fossil_bluecrab_t *out, int8_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_I8;
-    out->v.i8 = val;
-}
-
-void fossil_bluecrab_set_u64(fossil_bluecrab_t *out, uint64_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_U64;
-    out->v.u64 = val;
-}
-void fossil_bluecrab_set_u32(fossil_bluecrab_t *out, uint32_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_U32;
-    out->v.u32 = val;
-}
-void fossil_bluecrab_set_u16(fossil_bluecrab_t *out, uint16_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_U16;
-    out->v.u16 = val;
-}
-void fossil_bluecrab_set_u8(fossil_bluecrab_t *out, uint8_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_U8;
-    out->v.u8 = val;
-}
-
-void fossil_bluecrab_set_hex(fossil_bluecrab_t *out, uint64_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_HEX;
-    out->v.u64 = val;
-}
-void fossil_bluecrab_set_oct(fossil_bluecrab_t *out, uint64_t val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_OCT;
-    out->v.u64 = val;
-}
-
-void fossil_bluecrab_set_f64(fossil_bluecrab_t *out, double val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_F64;
-    out->v.f64 = val;
-}
-void fossil_bluecrab_set_f32(fossil_bluecrab_t *out, float val) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_F32;
-    out->v.f32 = val;
-}
-
-/* Duplicate the string (malloc+strcpy) */
-void fossil_bluecrab_set_cstr_dup(fossil_bluecrab_t *out, const char *s) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_CSTR;
-    if (s) {
-        size_t n = strlen(s) + 1;
-        char *dup = (char*)malloc(n);
-        if (dup) memcpy(dup, s, n);
-        out->v.cstr = dup;
-    } else {
-        out->v.cstr = NULL;
+/* ---------- helper: case-insensitive compare ---------- */
+static int fbc_stricmp(const char *a, const char *b) {
+    while (*a && *b) {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) return (ca - cb);
+        a++; b++;
     }
+    return (int)(unsigned char)tolower((unsigned char)*a) - (int)(unsigned char)tolower((unsigned char)*b);
 }
 
-/* Take pointer as-is (alias) -- caller manages lifetime */
-void fossil_bluecrab_set_cstr_alias(fossil_bluecrab_t *out, char *s) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_CSTR;
-    out->v.cstr = s;
+/* ---------- type mapping ---------- */
+fossil_bluecrab_type_t fossil_bluecrab_type_from_string(const char *name) {
+    if (!name) return FBC_T_UNKNOWN;
+    if (fbc_stricmp(name, "i8") == 0) return FBC_T_I8;
+    if (fbc_stricmp(name, "i16") == 0) return FBC_T_I16;
+    if (fbc_stricmp(name, "i32") == 0) return FBC_T_I32;
+    if (fbc_stricmp(name, "i64") == 0) return FBC_T_I64;
+    if (fbc_stricmp(name, "u8") == 0) return FBC_T_U8;
+    if (fbc_stricmp(name, "u16") == 0) return FBC_T_U16;
+    if (fbc_stricmp(name, "u32") == 0) return FBC_T_U32;
+    if (fbc_stricmp(name, "u64") == 0) return FBC_T_U64;
+    if (fbc_stricmp(name, "hex") == 0) return FBC_T_HEX;
+    if (fbc_stricmp(name, "oct") == 0) return FBC_T_OCT;
+    if (fbc_stricmp(name, "f32") == 0) return FBC_T_F32;
+    if (fbc_stricmp(name, "f64") == 0) return FBC_T_F64;
+    if (fbc_stricmp(name, "cstr") == 0) return FBC_T_CSTR;
+    if (fbc_stricmp(name, "char") == 0 || fbc_stricmp(name, "ch") == 0) return FBC_T_CHAR;
+    return FBC_T_UNKNOWN;
 }
 
-void fossil_bluecrab_set_char(fossil_bluecrab_t *out, char c) {
-    fossil_bluecrab_clear(out);
-    out->type = FBC_TYPE_CHAR;
-    out->v.ch = c;
-}
-
-/* Clear (free duplicated string only) */
-void fossil_bluecrab_clear(fossil_bluecrab_t *v) {
-    if (!v) return;
-    if (v->type == FBC_TYPE_CSTR && v->v.cstr) {
-        free(v->v.cstr);
-        v->v.cstr = NULL;
-    }
-    v->type = FBC_TYPE_NONE;
-}
-
-/* --- mapping functions --- */
-
-const char *fossil_bluecrab_type_to_string(fossil_bluecrab_type_t t) {
-    switch (t) {
-        case FBC_TYPE_NONE: return "none";
-        case FBC_TYPE_I8:   return "i8";
-        case FBC_TYPE_I16:  return "i16";
-        case FBC_TYPE_I32:  return "i32";
-        case FBC_TYPE_I64:  return "i64";
-        case FBC_TYPE_U8:   return "u8";
-        case FBC_TYPE_U16:  return "u16";
-        case FBC_TYPE_U32:  return "u32";
-        case FBC_TYPE_U64:  return "u64";
-        case FBC_TYPE_HEX:  return "hex";
-        case FBC_TYPE_OCT:  return "oct";
-        case FBC_TYPE_F32:  return "f32";
-        case FBC_TYPE_F64:  return "f64";
-        case FBC_TYPE_CSTR: return "cstr";
-        case FBC_TYPE_CHAR: return "char";
+const char *fossil_bluecrab_type_to_string(fossil_bluecrab_type_t tag) {
+    switch (tag) {
+        case FBC_T_I8:  return "i8";
+        case FBC_T_I16: return "i16";
+        case FBC_T_I32: return "i32";
+        case FBC_T_I64: return "i64";
+        case FBC_T_U8:  return "u8";
+        case FBC_T_U16: return "u16";
+        case FBC_T_U32: return "u32";
+        case FBC_T_U64: return "u64";
+        case FBC_T_HEX: return "hex";
+        case FBC_T_OCT: return "oct";
+        case FBC_T_F32: return "f32";
+        case FBC_T_F64: return "f64";
+        case FBC_T_CSTR: return "cstr";
+        case FBC_T_CHAR: return "char";
         default: return "unknown";
     }
 }
 
-fossil_bluecrab_type_t fossil_bluecrab_string_to_type(const char *s) {
-    if (!s) return FBC_TYPE_NONE;
-    /* simple, case-sensitive matches */
-    if (strcmp(s,"i8")==0) return FBC_TYPE_I8;
-    if (strcmp(s,"i16")==0) return FBC_TYPE_I16;
-    if (strcmp(s,"i32")==0) return FBC_TYPE_I32;
-    if (strcmp(s,"i64")==0) return FBC_TYPE_I64;
-    if (strcmp(s,"u8")==0) return FBC_TYPE_U8;
-    if (strcmp(s,"u16")==0) return FBC_TYPE_U16;
-    if (strcmp(s,"u32")==0) return FBC_TYPE_U32;
-    if (strcmp(s,"u64")==0) return FBC_TYPE_U64;
-    if (strcmp(s,"hex")==0) return FBC_TYPE_HEX;
-    if (strcmp(s,"oct")==0) return FBC_TYPE_OCT;
-    if (strcmp(s,"f32")==0) return FBC_TYPE_F32;
-    if (strcmp(s,"f64")==0) return FBC_TYPE_F64;
-    if (strcmp(s,"cstr")==0) return FBC_TYPE_CSTR;
-    if (strcmp(s,"char")==0) return FBC_TYPE_CHAR;
-    if (strcmp(s,"none")==0) return FBC_TYPE_NONE;
-    return FBC_TYPE_NONE;
+/* ---------- safety helpers for str->int conversions ---------- */
+static bool fbc_str_to_int64(const char *s, long long *out, int base) {
+    if (!s || !out) return false;
+    errno = 0;
+    char *end = NULL;
+    long long val = strtoll(s, &end, base);
+    if (end == s) return false; /* no conversion */
+    if (errno == ERANGE) return false;
+    /* skip trailing spaces */
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return false; /* unparsed trailing */
+    *out = val;
+    return true;
+}
+static bool fbc_str_to_uint64(const char *s, unsigned long long *out, int base) {
+    if (!s || !out) return false;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long val = strtoull(s, &end, base);
+    if (end == s) return false;
+    if (errno == ERANGE) return false;
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return false;
+    *out = val;
+    return true;
+}
+static bool fbc_str_to_float(const char *s, float *out) {
+    if (!s || !out) return false;
+    errno = 0;
+    char *end = NULL;
+    float v = strtof(s, &end);
+    if (end == s) return false;
+    if (errno == ERANGE) return false;
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return false;
+    *out = v;
+    return true;
+}
+static bool fbc_str_to_double(const char *s, double *out) {
+    if (!s || !out) return false;
+    errno = 0;
+    char *end = NULL;
+    double v = strtod(s, &end);
+    if (end == s) return false;
+    if (errno == ERANGE) return false;
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0') return false;
+    *out = v;
+    return true;
 }
 
-/* --- to-string conversion --- */
-/* Writes a textual representation into buf (NUL-terminated). Returns bytes written (excluding NUL). */
-size_t fossil_bluecrab_to_string(const fossil_bluecrab_t *v, char *buf, size_t bufsize) {
-    if (!v || !buf || bufsize == 0) return 0;
-    int wrote = 0;
-    switch (v->type) {
-        case FBC_TYPE_I8:
-            wrote = snprintf(buf, bufsize, "%" PRId8, v->v.i8);
-            break;
-        case FBC_TYPE_I16:
-            wrote = snprintf(buf, bufsize, "%" PRId16, v->v.i16);
-            break;
-        case FBC_TYPE_I32:
-            wrote = snprintf(buf, bufsize, "%" PRId32, v->v.i32);
-            break;
-        case FBC_TYPE_I64:
-            wrote = snprintf(buf, bufsize, "%" PRId64, v->v.i64);
-            break;
-        case FBC_TYPE_U8:
-            wrote = snprintf(buf, bufsize, "%" PRIu8, v->v.u8);
-            break;
-        case FBC_TYPE_U16:
-            wrote = snprintf(buf, bufsize, "%" PRIu16, v->v.u16);
-            break;
-        case FBC_TYPE_U32:
-            wrote = snprintf(buf, bufsize, "%" PRIu32, v->v.u32);
-            break;
-        case FBC_TYPE_U64:
-            wrote = snprintf(buf, bufsize, "%" PRIu64, v->v.u64);
-            break;
-        case FBC_TYPE_HEX:
-            wrote = snprintf(buf, bufsize, "0x%" PRIx64, v->v.u64);
-            break;
-        case FBC_TYPE_OCT:
-            wrote = snprintf(buf, bufsize, "0%" PRIo64, v->v.u64);
-            break;
-        case FBC_TYPE_F32:
-            wrote = snprintf(buf, bufsize, "%g", (double)v->v.f32);
-            break;
-        case FBC_TYPE_F64:
-            wrote = snprintf(buf, bufsize, "%g", v->v.f64);
-            break;
-        case FBC_TYPE_CSTR:
-            if (v->v.cstr) {
-                wrote = snprintf(buf, bufsize, "%s", v->v.cstr);
-            } else {
-                wrote = snprintf(buf, bufsize, "(null)");
+/* ---------- parse function ---------- */
+bool fossil_bluecrab_parse(fossil_bluecrab_type_t tag, const char *str, fossil_bluecrab_value_t *out) {
+    if (!str || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    switch (tag) {
+        case FBC_T_I8: {
+            long long v;
+            if (!fbc_str_to_int64(str, &v, 10)) return false;
+            if (v < INT8_MIN || v > INT8_MAX) return false;
+            out->i8 = (int8_t)v;
+            return true;
+        }
+        case FBC_T_I16: {
+            long long v;
+            if (!fbc_str_to_int64(str, &v, 10)) return false;
+            if (v < INT16_MIN || v > INT16_MAX) return false;
+            out->i16 = (int16_t)v;
+            return true;
+        }
+        case FBC_T_I32: {
+            long long v;
+            if (!fbc_str_to_int64(str, &v, 10)) return false;
+            if (v < INT32_MIN || v > INT32_MAX) return false;
+            out->i32 = (int32_t)v;
+            return true;
+        }
+        case FBC_T_I64: {
+            long long v;
+            if (!fbc_str_to_int64(str, &v, 10)) return false;
+            out->i64 = (int64_t)v;
+            return true;
+        }
+        case FBC_T_U8: {
+            unsigned long long v;
+            if (!fbc_str_to_uint64(str, &v, 10)) return false;
+            if (v > UINT8_MAX) return false;
+            out->u8 = (uint8_t)v;
+            return true;
+        }
+        case FBC_T_U16: {
+            unsigned long long v;
+            if (!fbc_str_to_uint64(str, &v, 10)) return false;
+            if (v > UINT16_MAX) return false;
+            out->u16 = (uint16_t)v;
+            return true;
+        }
+        case FBC_T_U32: {
+            unsigned long long v;
+            if (!fbc_str_to_uint64(str, &v, 10)) return false;
+            if (v > UINT32_MAX) return false;
+            out->u32 = (uint32_t)v;
+            return true;
+        }
+        case FBC_T_U64: {
+            unsigned long long v;
+            if (!fbc_str_to_uint64(str, &v, 10)) return false;
+            out->u64 = (uint64_t)v;
+            return true;
+        }
+        case FBC_T_HEX: {
+            /* Accept "0x" prefix or not */
+            const char *s = str;
+            while (isspace((unsigned char)*s)) s++;
+            if (s[0]=='0' && (s[1]=='x' || s[1]=='X')) s += 2;
+            unsigned long long v;
+            if (!fbc_str_to_uint64(s, &v, 16)) return false;
+            out->u64 = (uint64_t)v;
+            return true;
+        }
+        case FBC_T_OCT: {
+            const char *s = str;
+            while (isspace((unsigned char)*s)) s++;
+            /* allow optional leading 0 */
+            if (s[0]=='0' && (s[1] != 'x' && s[1] != 'X')) s += 0; /* keep '0' because strtoull with base 8 expects digits */
+            unsigned long long v;
+            if (!fbc_str_to_uint64(s, &v, 8)) return false;
+            out->u64 = (uint64_t)v;
+            return true;
+        }
+        case FBC_T_F32: {
+            float v;
+            if (!fbc_str_to_float(str, &v)) return false;
+            out->f32 = v;
+            return true;
+        }
+        case FBC_T_F64: {
+            double v;
+            if (!fbc_str_to_double(str, &v)) return false;
+            out->f64 = v;
+            return true;
+        }
+        case FBC_T_CSTR: {
+            /* allocate a copy */
+            char *dup = NULL;
+            size_t len = strlen(str);
+            dup = (char*)malloc(len + 1);
+            if (!dup) return false;
+            memcpy(dup, str, len + 1);
+            out->cstr = dup;
+            return true;
+        }
+        case FBC_T_CHAR: {
+            /* accept single character or first char of string; allow quoted like 'a' */
+            const char *s = str;
+            while (isspace((unsigned char)*s)) s++;
+            if (s[0] == '\'' && s[1] && s[2] == '\'') {
+                out->ch = s[1];
+                return true;
             }
-            break;
-        case FBC_TYPE_CHAR:
-            /* printable char or escaped */
-            if ((unsigned char)v->v.ch >= 0x20 && (unsigned char)v->v.ch <= 0x7e) {
-                wrote = snprintf(buf, bufsize, "%c", v->v.ch);
-            } else {
-                wrote = snprintf(buf, bufsize, "\\x%02x", (unsigned char)v->v.ch);
-            }
-            break;
-        case FBC_TYPE_NONE:
+            if (s[0] == '\0') return false;
+            out->ch = s[0];
+            return true;
+        }
         default:
-            wrote = snprintf(buf, bufsize, "(none)");
-            break;
+            return false;
     }
-    if (wrote < 0) return 0;
-    if ((size_t)wrote >= bufsize) return bufsize - 1; /* truncated */
-    return (size_t)wrote;
 }
 
-/* --- 64-bit hash --- */
-/* We implement a simple but well-mixed 64-bit hash:
- * - initial h = salt ^ (time + golden_constant)
- * - for each 8-byte word process; remaining bytes processed one-by-one
- * - multiplies and xors with mixing constants (splitmix-style constants)
+/* ---------- to string ---------- */
+char *fossil_bluecrab_to_string(fossil_bluecrab_type_t tag, const fossil_bluecrab_value_t *val) {
+    if (!val) return NULL;
+    char *buf = NULL;
+    int needed = 0;
+    switch (tag) {
+        case FBC_T_I8:
+            needed = snprintf(NULL, 0, "%" PRId8, val->i8) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRId8, val->i8);
+            return buf;
+        case FBC_T_I16:
+            needed = snprintf(NULL, 0, "%" PRId16, val->i16) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRId16, val->i16);
+            return buf;
+        case FBC_T_I32:
+            needed = snprintf(NULL, 0, "%" PRId32, val->i32) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRId32, val->i32);
+            return buf;
+        case FBC_T_I64:
+            needed = snprintf(NULL, 0, "%" PRId64, val->i64) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRId64, val->i64);
+            return buf;
+        case FBC_T_U8:
+            needed = snprintf(NULL, 0, "%" PRIu8, val->u8) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRIu8, val->u8);
+            return buf;
+        case FBC_T_U16:
+            needed = snprintf(NULL, 0, "%" PRIu16, val->u16) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRIu16, val->u16);
+            return buf;
+        case FBC_T_U32:
+            needed = snprintf(NULL, 0, "%" PRIu32, val->u32) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%" PRIu32, val->u32);
+            return buf;
+        case FBC_T_U64:
+        case FBC_T_HEX:
+        case FBC_T_OCT:
+            /* format as decimal for u64 and special forms for hex/oct */
+            if (tag == FBC_T_HEX) {
+                needed = snprintf(NULL, 0, "0x%" PRIx64, val->u64) + 1;
+                buf = (char*)malloc(needed);
+                if (!buf) return NULL;
+                snprintf(buf, needed, "0x%" PRIx64, val->u64);
+                return buf;
+            } else if (tag == FBC_T_OCT) {
+                needed = snprintf(NULL, 0, "0%" PRIo64, val->u64) + 1;
+                buf = (char*)malloc(needed);
+                if (!buf) return NULL;
+                snprintf(buf, needed, "0%" PRIo64, val->u64);
+                return buf;
+            } else {
+                needed = snprintf(NULL, 0, "%" PRIu64, val->u64) + 1;
+                buf = (char*)malloc(needed);
+                if (!buf) return NULL;
+                snprintf(buf, needed, "%" PRIu64, val->u64);
+                return buf;
+            }
+        case FBC_T_F32: {
+            /* use "%g" formatting */
+            needed = snprintf(NULL, 0, "%g", (double)val->f32) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%g", (double)val->f32);
+            return buf;
+        }
+        case FBC_T_F64: {
+            needed = snprintf(NULL, 0, "%g", val->f64) + 1;
+            buf = (char*)malloc(needed);
+            if (!buf) return NULL;
+            snprintf(buf, needed, "%g", val->f64);
+            return buf;
+        }
+        case FBC_T_CSTR:
+            if (!val->cstr) return NULL;
+            buf = (char*)malloc(strlen(val->cstr) + 1);
+            if (!buf) return NULL;
+            strcpy(buf, val->cstr);
+            return buf;
+        case FBC_T_CHAR:
+            buf = (char*)malloc(2);
+            if (!buf) return NULL;
+            buf[0] = val->ch;
+            buf[1] = '\0';
+            return buf;
+        default:
+            return NULL;
+    }
+}
+
+/* ---------- free ---------- */
+void fossil_bluecrab_free_value(fossil_bluecrab_type_t tag, fossil_bluecrab_value_t *val) {
+    if (!val) return;
+    if (tag == FBC_T_CSTR && val->cstr) {
+        free(val->cstr);
+        val->cstr = NULL;
+    }
+    /* zero out for safety */
+    memset(val, 0, sizeof(*val));
+}
+
+/* ---------- equal ---------- */
+#include <string.h>
+bool fossil_bluecrab_equal(fossil_bluecrab_type_t tag, const fossil_bluecrab_value_t *a, const fossil_bluecrab_value_t *b) {
+    if (!a || !b) return false;
+    switch (tag) {
+        case FBC_T_I8:  return a->i8 == b->i8;
+        case FBC_T_I16: return a->i16 == b->i16;
+        case FBC_T_I32: return a->i32 == b->i32;
+        case FBC_T_I64: return a->i64 == b->i64;
+        case FBC_T_U8:  return a->u8 == b->u8;
+        case FBC_T_U16: return a->u16 == b->u16;
+        case FBC_T_U32: return a->u32 == b->u32;
+        case FBC_T_U64:
+        case FBC_T_HEX:
+        case FBC_T_OCT:
+            return a->u64 == b->u64;
+        case FBC_T_F32: {
+            /* bitwise compare to avoid -0 vs +0 weirdness; use memcmp on float */
+            uint32_t A, B;
+            memcpy(&A, &a->f32, sizeof(A));
+            memcpy(&B, &b->f32, sizeof(B));
+            return A == B;
+        }
+        case FBC_T_F64: {
+            uint64_t A, B;
+            memcpy(&A, &a->f64, sizeof(A));
+            memcpy(&B, &b->f64, sizeof(B));
+            return A == B;
+        }
+        case FBC_T_CSTR:
+            if (a->cstr == NULL && b->cstr == NULL) return true;
+            if (a->cstr == NULL || b->cstr == NULL) return false;
+            return strcmp(a->cstr, b->cstr) == 0;
+        case FBC_T_CHAR:
+            return a->ch == b->ch;
+        default:
+            return false;
+    }
+}
+
+/* ---------- 64-bit hash with salt/time (only 1 param allowed) ---------- */
+/* We'll implement FNV-1a 64-bit, then mix with a runtime salt (derived from time() and
+ * a pointer/address entropy and optionally pid if available).
  *
- * This is NOT intended as a drop-in cryptographic MAC. If you need cryptographically
- * strong HMAC, use an HMAC-SHA-256 truncated to 64 bits or SipHash.
+ * The API signature is exactly: static uint64_t fossil_bluecrab_hash(const char *str)
+ *
+ * Salt is computed once (on first call) and stored in static variable so repeated calls
+ * in the same process will be consistent; salt includes time() so it's time-dependent.
  */
-static inline uint64_t rotl64(uint64_t x, int r) {
-    return (x << r) | (x >> (64 - r));
+
+static uint64_t fbc_runtime_salt(void) {
+    /* combine time, pointer, pid (if available), and monotonic clock if available */
+    static uint64_t salt = 0;
+    if (salt != 0) return salt;
+
+    uint64_t s = 0xcbf29ce484222325ULL; /* FNV offset basis as starting entropy */
+
+    time_t t = time(NULL);
+    s ^= (uint64_t)(t);
+    s *= 0x100000001b3ULL;
+
+    /* add address entropy */
+    uintptr_t p = (uintptr_t)&fbc_runtime_salt;
+    s ^= (uint64_t)p;
+    s *= 0x100000001b3ULL;
+
+    /* try to add pid on POSIX */
+#ifdef __unix__
+    s ^= (uint64_t)(uintptr_t)getpid();
+    s *= 0x100000001b3ULL;
+#endif
+
+    /* mix once with a few rounds of xorshift */
+    s ^= (s << 13);
+    s ^= (s >> 7);
+    s ^= (s << 17);
+
+    /* avoid zero salt */
+    if (s == 0) s = 0x9e3779b97f4a7c15ULL;
+
+    salt = s;
+    return salt;
 }
 
-uint64_t fossil_bluecrab_hash64(const void *data, size_t len, uint64_t salt, uint64_t t) {
-    const uint8_t *p = (const uint8_t*)data;
-    const uint64_t GOLDEN = 0x9e3779b97f4a7c15ULL;
-    uint64_t h = salt ^ (t + GOLDEN);
-
-    /* Process 8-byte chunks */
-    while (len >= 8) {
-        uint64_t k = 0;
-        memcpy(&k, p, 8);
-        /* mix */
-        k ^= h;
-        k *= 0xbf58476d1ce4e5b9ULL;
-        k = rotl64(k, 31);
-        k *= 0x94d049bb133111ebULL;
-        h ^= k;
-        h = rotl64(h, 27) * 5 + 0x52dce729;
-        p += 8;
-        len -= 8;
+static uint64_t fbc_fnv1a_64(const unsigned char *data, size_t len) {
+    const uint64_t FNV_OFFSET_BASIS = 0xcbf29ce484222325ULL;
+    const uint64_t FNV_PRIME = 0x100000001b3ULL;
+    uint64_t h = FNV_OFFSET_BASIS;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= (uint64_t)data[i];
+        h *= FNV_PRIME;
     }
-
-    /* tail */
-    uint64_t tail = 0;
-    switch (len) {
-        case 7: tail ^= (uint64_t)p[6] << 48; /* fallthrough */
-        case 6: tail ^= (uint64_t)p[5] << 40; /* fallthrough */
-        case 5: tail ^= (uint64_t)p[4] << 32; /* fallthrough */
-        case 4: tail ^= (uint64_t)p[3] << 24; /* fallthrough */
-        case 3: tail ^= (uint64_t)p[2] << 16; /* fallthrough */
-        case 2: tail ^= (uint64_t)p[1] << 8;  /* fallthrough */
-        case 1: tail ^= (uint64_t)p[0];       break;
-        case 0: break;
-    }
-    if (tail) {
-        tail ^= h;
-        tail *= 0xbf58476d1ce4e5b9ULL;
-        tail = rotl64(tail, 31);
-        tail *= 0x94d049bb133111ebULL;
-        h ^= tail;
-    }
-
-    /* finalization mix (inspired by splitmix64) */
-    h ^= h >> 30;
-    h *= 0xbf58476d1ce4e5b9ULL;
-    h ^= h >> 27;
-    h *= 0x94d049bb133111ebULL;
-    h ^= h >> 31;
-
     return h;
 }
 
-/* Serialize value into a small buffer and hash it. This keeps hash_value deterministic across types. */
-uint64_t fossil_bluecrab_hash_value(const fossil_bluecrab_t *v, uint64_t salt, uint64_t t) {
-    if (!v) return fossil_bluecrab_hash64(NULL, 0, salt, t);
-    uint8_t buf[256];
-    size_t pos = 0;
+static uint64_t fbc_rotl64(uint64_t x, unsigned r) {
+    return (x << r) | (x >> (64 - r));
+}
 
-    /* include type tag in serialization */
-    if (pos + 1 <= sizeof(buf)) {
-        buf[pos++] = (uint8_t)(v->type & 0xff);
-    }
+static uint64_t fbc_mix(uint64_t h, uint64_t salt) {
+    /* mix using xor/rol/multiply */
+    h ^= salt;
+    h = fbc_rotl64(h, 31);
+    h *= 0x9ddfea08eb382d69ULL; /* large odd constant */
+    h ^= (h >> 33);
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= (h >> 33);
+    return h;
+}
 
-    switch (v->type) {
-        case FBC_TYPE_I8:
-            if (pos + sizeof(int8_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.i8, sizeof(int8_t));
-                pos += sizeof(int8_t);
-            }
-            break;
-        case FBC_TYPE_I16:
-            if (pos + sizeof(int16_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.i16, sizeof(int16_t));
-                pos += sizeof(int16_t);
-            }
-            break;
-        case FBC_TYPE_I32:
-            if (pos + sizeof(int32_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.i32, sizeof(int32_t));
-                pos += sizeof(int32_t);
-            }
-            break;
-        case FBC_TYPE_I64:
-            if (pos + sizeof(int64_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.i64, sizeof(int64_t));
-                pos += sizeof(int64_t);
-            }
-            break;
-        case FBC_TYPE_U8:
-            if (pos + sizeof(uint8_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.u8, sizeof(uint8_t));
-                pos += sizeof(uint8_t);
-            }
-            break;
-        case FBC_TYPE_U16:
-            if (pos + sizeof(uint16_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.u16, sizeof(uint16_t));
-                pos += sizeof(uint16_t);
-            }
-            break;
-        case FBC_TYPE_U32:
-            if (pos + sizeof(uint32_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.u32, sizeof(uint32_t));
-                pos += sizeof(uint32_t);
-            }
-            break;
-        case FBC_TYPE_U64:
-        case FBC_TYPE_HEX:
-        case FBC_TYPE_OCT:
-            if (pos + sizeof(uint64_t) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.u64, sizeof(uint64_t));
-                pos += sizeof(uint64_t);
-            }
-            break;
-        case FBC_TYPE_F32:
-            if (pos + sizeof(float) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.f32, sizeof(float));
-                pos += sizeof(float);
-            }
-            break;
-        case FBC_TYPE_F64:
-            if (pos + sizeof(double) <= sizeof(buf)) {
-                memcpy(buf + pos, &v->v.f64, sizeof(double));
-                pos += sizeof(double);
-            }
-            break;
-        case FBC_TYPE_CSTR:
-            if (v->v.cstr) {
-                size_t n = strlen(v->v.cstr);
-                /* copy up to remaining buffer */
-                size_t tocopy = (n <= sizeof(buf) - pos) ? n : (sizeof(buf) - pos);
-                if (tocopy) {
-                    memcpy(buf + pos, v->v.cstr, tocopy);
-                    pos += tocopy;
-                }
-            }
-            break;
-        case FBC_TYPE_CHAR:
-            if (pos + 1 <= sizeof(buf)) {
-                buf[pos++] = (uint8_t)v->v.ch;
-            }
-            break;
-        case FBC_TYPE_NONE:
-        default:
-            /* nothing else */
-            break;
-    }
-
-    return fossil_bluecrab_hash64(buf, pos, salt, t);
+/* public: exactly required signature */
+static uint64_t fossil_bluecrab_hash(const char *str) {
+    if (!str) return 0;
+    uint64_t salt = fbc_runtime_salt();
+    const unsigned char *data = (const unsigned char*)str;
+    size_t len = strlen(str);
+    uint64_t h = fbc_fnv1a_64(data, len);
+    h = fbc_mix(h, salt);
+    return h;
 }
