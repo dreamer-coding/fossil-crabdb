@@ -12,196 +12,186 @@
  * -----------------------------------------------------------------------------
  */
 #include "fossil/crabdb/storage.h"
-#include <time.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
-// -----------------------------------------------------------------------------
-// Internal record format
-// -----------------------------------------------------------------------------
+/* --- internal entry --- */
 typedef struct {
-    uint32_t key_len;
-    uint32_t value_len;
-    uint64_t timestamp;
-    uint64_t hash;
-    // followed by key bytes, then value bytes
-} record_header_t;
+    char *key;
+    fossil_bluecrab_type_t tag;
+    fossil_bluecrab_value_t val;
+    bool in_use;
+} fbc_entry_t;
 
-struct fossil_store {
-    FILE* fp;
-    char* path;
+struct fossil_bluecrab_storeage {
+    fbc_entry_t *entries;
+    size_t capacity;
     size_t count;
 };
 
-// -----------------------------------------------------------------------------
-// Simple 64-bit FNV-1a hash (salt + timestamp mixed in)
-// -----------------------------------------------------------------------------
-uint64_t fossil_bluecrab_store_hash(const char* data,
-                                    size_t len,
-                                    uint64_t salt,
-                                    uint64_t timestamp) {
-    const uint64_t FNV_OFFSET = 1469598103934665603ULL;
-    const uint64_t FNV_PRIME  = 1099511628211ULL;
-
-    uint64_t h = FNV_OFFSET ^ salt ^ timestamp;
-    for (size_t i = 0; i < len; i++) {
-        h ^= (unsigned char)data[i];
-        h *= FNV_PRIME;
-    }
-    return h;
+/* --- helpers --- */
+static size_t fbc_mod_hash(const char *key, size_t cap) {
+    uint64_t h = fossil_bluecrab_hash(key);
+    return (size_t)(h % cap);
 }
 
-// -----------------------------------------------------------------------------
-// Open/Close
-// -----------------------------------------------------------------------------
-fossil_store_t* fossil_bluecrab_store_open(const char* path, bool create_if_missing) {
-    if (!path) return NULL;
-
-    FILE* fp = fopen(path, "r+b");
-    if (!fp && create_if_missing) {
-        fp = fopen(path, "w+b");
+/* --- API --- */
+fossil_bluecrab_storeage_t *fossil_bluecrab_storeage_create(size_t initial_capacity) {
+    fossil_bluecrab_storeage_t *st = (fossil_bluecrab_storeage_t *)calloc(1, sizeof(*st));
+    if (!st) return NULL;
+    if (initial_capacity < 8) initial_capacity = 8;
+    st->entries = (fbc_entry_t *)calloc(initial_capacity, sizeof(fbc_entry_t));
+    if (!st->entries) {
+        free(st);
+        return NULL;
     }
-    if (!fp) return NULL;
-
-    fossil_store_t* store = calloc(1, sizeof(*store));
-    store->fp = fp;
-    store->path = strdup(path);
-
-    // Count records
-    rewind(fp);
-    size_t count = 0;
-    while (1) {
-        record_header_t hdr;
-        if (fread(&hdr, sizeof(hdr), 1, fp) != 1) break;
-        fseek(fp, hdr.key_len + hdr.value_len, SEEK_CUR);
-        count++;
-    }
-    store->count = count;
-    rewind(fp);
-
-    return store;
+    st->capacity = initial_capacity;
+    st->count = 0;
+    return st;
 }
 
-void fossil_bluecrab_store_close(fossil_store_t* store) {
-    if (!store) return;
-    if (store->fp) fclose(store->fp);
-    free(store->path);
-    free(store);
+void fossil_bluecrab_storeage_destroy(fossil_bluecrab_storeage_t *st) {
+    if (!st) return;
+    for (size_t i = 0; i < st->capacity; i++) {
+        if (st->entries[i].in_use) {
+            free(st->entries[i].key);
+            fossil_bluecrab_free_value(st->entries[i].tag, &st->entries[i].val);
+        }
+    }
+    free(st->entries);
+    free(st);
 }
 
-// -----------------------------------------------------------------------------
-// Put (append new record)
-// -----------------------------------------------------------------------------
-bool fossil_bluecrab_store_put(fossil_store_t* store,
-                               const char* key,
-                               const char* value_json) {
-    if (!store || !key || !value_json) return false;
+static bool fbc_store_rehash(fossil_bluecrab_storeage_t *st, size_t newcap) {
+    fbc_entry_t *old = st->entries;
+    size_t oldcap = st->capacity;
 
-    uint32_t klen = (uint32_t)strlen(key);
-    uint32_t vlen = (uint32_t)strlen(value_json);
-    uint64_t ts   = (uint64_t)time(NULL);
+    fbc_entry_t *new_entries = (fbc_entry_t *)calloc(newcap, sizeof(fbc_entry_t));
+    if (!new_entries) return false;
 
-    uint64_t h = fossil_bluecrab_store_hash(key, klen, 0xABCDEF1234567890ULL, ts);
-    h ^= fossil_bluecrab_store_hash(value_json, vlen, 0x1111111111111111ULL, ts);
+    st->entries = new_entries;
+    st->capacity = newcap;
+    st->count = 0;
 
-    record_header_t hdr = { klen, vlen, ts, h };
-
-    fseek(store->fp, 0, SEEK_END);
-    if (fwrite(&hdr, sizeof(hdr), 1, store->fp) != 1) return false;
-    if (fwrite(key, 1, klen, store->fp) != klen) return false;
-    if (fwrite(value_json, 1, vlen, store->fp) != vlen) return false;
-    fflush(store->fp);
-
-    store->count++;
+    for (size_t i = 0; i < oldcap; i++) {
+        if (old[i].in_use) {
+            fossil_bluecrab_storeage_set(st, old[i].key, old[i].tag, &old[i].val);
+            free(old[i].key);
+            fossil_bluecrab_free_value(old[i].tag, &old[i].val);
+        }
+    }
+    free(old);
     return true;
 }
 
-// -----------------------------------------------------------------------------
-// Get (scan for last record with given key)
-// -----------------------------------------------------------------------------
-char* fossil_bluecrab_store_get(fossil_store_t* store,
-                                const char* key) {
-    if (!store || !key) return NULL;
-
-    rewind(store->fp);
-    record_header_t hdr;
-    char* result = NULL;
-
-    while (fread(&hdr, sizeof(hdr), 1, store->fp) == 1) {
-        char* kbuf = malloc(hdr.key_len + 1);
-        char* vbuf = malloc(hdr.value_len + 1);
-        fread(kbuf, 1, hdr.key_len, store->fp);
-        fread(vbuf, 1, hdr.value_len, store->fp);
-        kbuf[hdr.key_len] = '\0';
-        vbuf[hdr.value_len] = '\0';
-
-        if (strcmp(kbuf, key) == 0) {
-            free(result);
-            result = strdup(vbuf);
-        }
-        free(kbuf);
-        free(vbuf);
+bool fossil_bluecrab_storeage_set(fossil_bluecrab_storeage_t *st,
+                                  const char *key,
+                                  fossil_bluecrab_type_t tag,
+                                  const fossil_bluecrab_value_t *val) {
+    if (!st || !key || !val) return false;
+    if (st->count * 2 >= st->capacity) {
+        if (!fbc_store_rehash(st, st->capacity * 2)) return false;
     }
-
-    return result;
+    size_t idx = fbc_mod_hash(key, st->capacity);
+    for (size_t i = 0; i < st->capacity; i++) {
+        size_t probe = (idx + i) % st->capacity;
+        fbc_entry_t *e = &st->entries[probe];
+        if (!e->in_use) {
+            e->key = strdup(key);
+            e->tag = tag;
+            memset(&e->val, 0, sizeof(e->val));
+            fossil_bluecrab_parse(tag, fossil_bluecrab_to_string(tag, val), &e->val);
+            e->in_use = true;
+            st->count++;
+            return true;
+        }
+        if (strcmp(e->key, key) == 0) {
+            fossil_bluecrab_free_value(e->tag, &e->val);
+            e->tag = tag;
+            fossil_bluecrab_parse(tag, fossil_bluecrab_to_string(tag, val), &e->val);
+            return true;
+        }
+    }
+    return false;
 }
 
-// -----------------------------------------------------------------------------
-// Remove (append a tombstone record)
-// -----------------------------------------------------------------------------
-bool fossil_bluecrab_store_remove(fossil_store_t* store,
-                                  const char* key) {
-    if (!store || !key) return false;
+bool fossil_bluecrab_storeage_get(fossil_bluecrab_storeage_t *st,
+                                  const char *key,
+                                  fossil_bluecrab_type_t *tag_out,
+                                  fossil_bluecrab_value_t *val_out) {
+    if (!st || !key) return false;
+    size_t idx = fbc_mod_hash(key, st->capacity);
+    for (size_t i = 0; i < st->capacity; i++) {
+        size_t probe = (idx + i) % st->capacity;
+        fbc_entry_t *e = &st->entries[probe];
+        if (!e->in_use) continue;
+        if (strcmp(e->key, key) == 0) {
+            if (tag_out) *tag_out = e->tag;
+            if (val_out) {
+                char *s = fossil_bluecrab_to_string(e->tag, &e->val);
+                fossil_bluecrab_parse(e->tag, s, val_out);
+                free(s);
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
-    uint32_t klen = (uint32_t)strlen(key);
-    uint32_t vlen = 0;
-    uint64_t ts   = (uint64_t)time(NULL);
-    uint64_t h    = fossil_bluecrab_store_hash(key, klen, 0xDEADBEAFDEADBEAFULL, ts);
+bool fossil_bluecrab_storeage_remove(fossil_bluecrab_storeage_t *st, const char *key) {
+    if (!st || !key) return false;
+    size_t idx = fbc_mod_hash(key, st->capacity);
+    for (size_t i = 0; i < st->capacity; i++) {
+        size_t probe = (idx + i) % st->capacity;
+        fbc_entry_t *e = &st->entries[probe];
+        if (!e->in_use) continue;
+        if (strcmp(e->key, key) == 0) {
+            free(e->key);
+            fossil_bluecrab_free_value(e->tag, &e->val);
+            memset(e, 0, sizeof(*e));
+            st->count--;
+            return true;
+        }
+    }
+    return false;
+}
 
-    record_header_t hdr = { klen, vlen, ts, h };
-
-    fseek(store->fp, 0, SEEK_END);
-    if (fwrite(&hdr, sizeof(hdr), 1, store->fp) != 1) return false;
-    if (fwrite(key, 1, klen, store->fp) != klen) return false;
-    fflush(store->fp);
-
-    store->count++;
+bool fossil_bluecrab_storeage_save(fossil_bluecrab_storeage_t *st, const char *filename) {
+    if (!st || !filename) return false;
+    FILE *f = fopen(filename, "w");
+    if (!f) return false;
+    for (size_t i = 0; i < st->capacity; i++) {
+        if (st->entries[i].in_use) {
+            char *valstr = fossil_bluecrab_to_string(st->entries[i].tag, &st->entries[i].val);
+            fprintf(f, "%s %s %s\n",
+                    st->entries[i].key,
+                    fossil_bluecrab_type_to_string(st->entries[i].tag),
+                    valstr ? valstr : "");
+            free(valstr);
+        }
+    }
+    fclose(f);
     return true;
 }
 
-// -----------------------------------------------------------------------------
-// Count (cheap: stored in memory)
-// -----------------------------------------------------------------------------
-size_t fossil_bluecrab_store_count(fossil_store_t* store) {
-    if (!store) return 0;
-    return store->count;
+bool fossil_bluecrab_storeage_load(fossil_bluecrab_storeage_t *st, const char *filename) {
+    if (!st || !filename) return false;
+    FILE *f = fopen(filename, "r");
+    if (!f) return false;
+    char key[256], type[32], val[512];
+    while (fscanf(f, "%255s %31s %511s", key, type, val) == 3) {
+        fossil_bluecrab_type_t tag = fossil_bluecrab_type_from_string(type);
+        fossil_bluecrab_value_t v;
+        if (fossil_bluecrab_parse(tag, val, &v)) {
+            fossil_bluecrab_storeage_set(st, key, tag, &v);
+            fossil_bluecrab_free_value(tag, &v);
+        }
+    }
+    fclose(f);
+    return true;
 }
 
-// -----------------------------------------------------------------------------
-// Iterate over all records
-// -----------------------------------------------------------------------------
-void fossil_bluecrab_store_iterate(fossil_store_t* store,
-                                   fossil_store_iter_cb cb,
-                                   void* userdata) {
-    if (!store || !cb) return;
-
-    rewind(store->fp);
-    record_header_t hdr;
-
-    while (fread(&hdr, sizeof(hdr), 1, store->fp) == 1) {
-        char* kbuf = malloc(hdr.key_len + 1);
-        char* vbuf = NULL;
-
-        fread(kbuf, 1, hdr.key_len, store->fp);
-        kbuf[hdr.key_len] = '\0';
-
-        if (hdr.value_len > 0) {
-            vbuf = malloc(hdr.value_len + 1);
-            fread(vbuf, 1, hdr.value_len, store->fp);
-            vbuf[hdr.value_len] = '\0';
-        }
-
-        cb(kbuf, vbuf, userdata);
-
-        free(kbuf);
-        free(vbuf);
-    }
+size_t fossil_bluecrab_storeage_count(fossil_bluecrab_storeage_t *st) {
+    return st ? st->count : 0;
 }
