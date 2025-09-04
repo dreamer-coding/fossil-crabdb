@@ -7,7 +7,6 @@ fossil_crabdb_lib = library('fossil_crabdb',
         'fileshell.c',
         'timeshell.c',
         'cacheshell.c',
-        'query.c',
         'storage.c',
         'bluecrab.c'
         ),
