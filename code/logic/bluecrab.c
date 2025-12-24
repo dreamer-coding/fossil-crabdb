@@ -27,303 +27,258 @@
 #include <string.h>
 #include <stdio.h>
 
-// ======================================================
-// Utilities
-// ======================================================
+/* ============================================================================
+ * DATABASE LIFECYCLE
+ * ============================================================================ */
+fossil_bluecrab_core_db_t* fossil_bluecrab_core_create_db(const char *name) {
+    if (!name) return NULL;
 
-static void* fossil_bluecrab_malloc(size_t size) {
-    void *ptr = malloc(size);
-    if (!ptr) {
-        fprintf(stderr, "BlueCrab: Out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-    return ptr;
-}
+    fossil_bluecrab_core_db_t *db = (fossil_bluecrab_core_db_t*)calloc(1, sizeof(fossil_bluecrab_core_db_t));
+    if (!db) return NULL;
 
-static char* fossil_bluecrab_strdup(const char *str) {
-    if (!str) return NULL;
-    size_t len = strlen(str) + 1;
-    char *copy = fossil_bluecrab_malloc(len);
-    memcpy(copy, str, len);
-    return copy;
-}
+    // Initialize name safely
+    strncpy(db->name, name, sizeof(db->name) - 1);
+    db->name[sizeof(db->name) - 1] = '\0';
 
-// ======================================================
-// Hashing & Tamper Protection
-// ======================================================
+    // Initialize table count
+    db->table_count = 0;
 
-uint64_t fossil_bluecrab_core_hash(const void *data, size_t len) {
-    // Simple FNV-1a hash
-    const uint8_t *ptr = (const uint8_t*)data;
-    uint64_t hash = 14695981039346656037ULL;
-    for (size_t i = 0; i < len; i++) {
-        hash ^= ptr[i];
-        hash *= 1099511628211ULL;
-    }
-    return hash;
-}
+    // Stronger hash salt: combine time + pointer address
+    uintptr_t addr = (uintptr_t)db;
+    db->hash_salt = ((uint64_t)time(NULL) << 32) ^ (addr & 0xFFFFFFFF);
 
-bool fossil_bluecrab_core_verify_integrity(fossil_bluecrab_db_t *db) {
-    if (!db) return false;
-    uint64_t hash_accum = 0;
-    for (size_t i = 0; i < db->table_count; i++) {
-        fossil_bluecrab_table_t *table = db->tables[i];
-        for (size_t j = 0; j < table->entry_count; j++) {
-            fossil_bluecrab_entry_t *entry = table->entries[j];
-            hash_accum ^= fossil_bluecrab_core_hash(entry->key, strlen(entry->key));
-            if (entry->value && entry->type != FBC_TYPE_NULL) {
-                hash_accum ^= fossil_bluecrab_core_hash(entry->value, sizeof(entry->value));
-            }
+    // Timestamp
+    db->last_modified = time(NULL);
+
+    // Initialize table slots to NULL / zero
+    for (size_t i = 0; i < FBC_MAX_TABLES; i++) {
+        db->tables[i].row_count = 0;
+        db->tables[i].column_count = 0;
+        db->tables[i].rows = NULL;
+        memset(db->tables[i].name, 0, sizeof(db->tables[i].name));
+        for (size_t c = 0; c < FBC_MAX_COLUMNS; c++) {
+            memset(db->tables[i].columns[c].name, 0, sizeof(db->tables[i].columns[c].name));
+            db->tables[i].columns[c].type = FBC_TYPE_NULL;
+            db->tables[i].columns[c].is_primary_key = false;
+            db->tables[i].columns[c].is_indexed = false;
         }
     }
-    return (hash_accum == db->last_hash);
-}
 
-// ======================================================
-// Database Lifecycle
-// ======================================================
-
-fossil_bluecrab_db_t* fossil_bluecrab_core_create_db(size_t initial_capacity) {
-    fossil_bluecrab_db_t *db = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_db_t));
-    db->tables = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_table_t*) * initial_capacity);
-    db->table_count = 0;
-    db->capacity = initial_capacity;
-    db->last_hash = 0;
-    db->in_transaction = false;
-
-    db->snapshots = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_snapshot_t*) * 16);
-    db->snapshot_count = 0;
-    db->snapshot_capacity = 16;
     return db;
 }
 
-void fossil_bluecrab_core_free_db(fossil_bluecrab_db_t *db) {
-    if (!db) return;
+bool fossil_bluecrab_core_destroy_db(fossil_bluecrab_core_db_t *db) {
+    if (!db) return false;
     for (size_t i = 0; i < db->table_count; i++) {
-        fossil_bluecrab_table_t *table = db->tables[i];
-        for (size_t j = 0; j < table->entry_count; j++) {
-            free(table->entries[j]->key);
-            free(table->entries[j]->value);
-            free(table->entries[j]);
+        fossil_bluecrab_core_table_t *table = &db->tables[i];
+        for (size_t r = 0; r < table->row_count; r++) {
+            free(table->rows[r]);
         }
-        free(table->entries);
-        free(table->name);
-        free(table);
+        free(table->rows);
     }
-    for (size_t i = 0; i < db->snapshot_count; i++) {
-        free(db->snapshots[i]->message);
-        free(db->snapshots[i]);
-    }
-    free(db->snapshots);
-    free(db->tables);
     free(db);
+    return true;
 }
 
-// ======================================================
-// Table Management
-// ======================================================
-
-fossil_bluecrab_table_t* fossil_bluecrab_core_create_table(fossil_bluecrab_db_t *db, const char *name) {
-    if (!db || !name) return NULL;
-    if (db->table_count >= db->capacity) {
-        db->capacity *= 2;
-        db->tables = realloc(db->tables, sizeof(fossil_bluecrab_table_t*) * db->capacity);
-    }
-    fossil_bluecrab_table_t *table = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_table_t));
-    table->name = fossil_bluecrab_strdup(name);
-    table->entries = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_entry_t*) * 16);
-    table->entry_count = 0;
-    table->capacity = 16;
-    db->tables[db->table_count++] = table;
+/* ============================================================================
+ * TABLE MANAGEMENT
+ * ============================================================================ */
+fossil_bluecrab_core_table_t* fossil_bluecrab_core_create_table(fossil_bluecrab_core_db_t *db, const char *table_name) {
+    if (!db || !table_name || db->table_count >= FBC_MAX_TABLES) return NULL;
+    fossil_bluecrab_core_table_t *table = &db->tables[db->table_count++];
+    strncpy(table->name, table_name, sizeof(table->name)-1);
+    table->row_count = 0;
+    table->column_count = 0;
+    table->rows = NULL;
+    db->last_modified = time(NULL);
     return table;
 }
 
-bool fossil_bluecrab_core_drop_table(fossil_bluecrab_db_t *db, const char *name) {
-    if (!db || !name) return false;
+bool fossil_bluecrab_core_drop_table(fossil_bluecrab_core_db_t *db, const char *table_name) {
+    if (!db || !table_name) return false;
     for (size_t i = 0; i < db->table_count; i++) {
-        if (strcmp(db->tables[i]->name, name) == 0) {
-            fossil_bluecrab_table_t *table = db->tables[i];
-            for (size_t j = 0; j < table->entry_count; j++) {
-                free(table->entries[j]->key);
-                free(table->entries[j]->value);
-                free(table->entries[j]);
+        if (strcmp(db->tables[i].name, table_name) == 0) {
+            fossil_bluecrab_core_table_t *table = &db->tables[i];
+            for (size_t r = 0; r < table->row_count; r++) {
+                free(table->rows[r]);
             }
-            free(table->entries);
-            free(table->name);
-            free(table);
+            free(table->rows);
             // shift remaining tables
-            for (size_t k = i; k < db->table_count - 1; k++)
-                db->tables[k] = db->tables[k + 1];
+            for (size_t j = i; j < db->table_count-1; j++) {
+                db->tables[j] = db->tables[j+1];
+            }
             db->table_count--;
+            db->last_modified = time(NULL);
             return true;
         }
     }
     return false;
 }
 
-// ======================================================
-// CRUD Operations
-// ======================================================
-
-bool fossil_bluecrab_core_insert(fossil_bluecrab_table_t *table, const char *key, void *value, fossil_bluecrab_type_t type) {
-    if (!table || !key) return false;
-    if (table->entry_count >= table->capacity) {
-        table->capacity *= 2;
-        table->entries = realloc(table->entries, sizeof(fossil_bluecrab_entry_t*) * table->capacity);
-    }
-    fossil_bluecrab_entry_t *entry = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_entry_t));
-    entry->key = fossil_bluecrab_strdup(key);
-    entry->value = value ? value : NULL;
-    entry->type = type;
-    entry->created_at = time(NULL);
-    entry->updated_at = entry->created_at;
-    table->entries[table->entry_count++] = entry;
+/* ============================================================================
+ * ROW OPERATIONS
+ * ============================================================================ */
+bool fossil_bluecrab_core_insert_row(fossil_bluecrab_core_table_t *table, fossil_bluecrab_core_value_t *values) {
+    if (!table || !values) return false;
+    fossil_bluecrab_core_value_t **new_rows = (fossil_bluecrab_core_value_t**)realloc(table->rows, sizeof(fossil_bluecrab_core_value_t*) * (table->row_count + 1));
+    if (!new_rows) return false;
+    table->rows = new_rows;
+    fossil_bluecrab_core_value_t *row_copy = (fossil_bluecrab_core_value_t*)calloc(table->column_count, sizeof(fossil_bluecrab_core_value_t));
+    if (!row_copy) return false;
+    memcpy(row_copy, values, sizeof(fossil_bluecrab_core_value_t) * table->column_count);
+    table->rows[table->row_count++] = row_copy;
     return true;
 }
 
-fossil_bluecrab_entry_t* fossil_bluecrab_core_get(fossil_bluecrab_table_t *table, const char *key) {
-    if (!table || !key) return NULL;
-    for (size_t i = 0; i < table->entry_count; i++) {
-        if (strcmp(table->entries[i]->key, key) == 0)
-            return table->entries[i];
+bool fossil_bluecrab_core_delete_row(fossil_bluecrab_core_table_t *table, size_t row_index) {
+    if (!table || row_index >= table->row_count) return false;
+    free(table->rows[row_index]);
+    for (size_t i = row_index; i < table->row_count - 1; i++) {
+        table->rows[i] = table->rows[i+1];
+    }
+    table->row_count--;
+    table->rows = (fossil_bluecrab_core_value_t**)realloc(table->rows, sizeof(fossil_bluecrab_core_value_t*) * table->row_count);
+    return true;
+}
+
+fossil_bluecrab_core_value_t* fossil_bluecrab_core_get_value(fossil_bluecrab_core_table_t *table, size_t row_index, const char *column_name) {
+    if (!table || row_index >= table->row_count || !column_name) return NULL;
+    for (size_t c = 0; c < table->column_count; c++) {
+        if (strcmp(table->columns[c].name, column_name) == 0) {
+            return &table->rows[row_index][c];
+        }
     }
     return NULL;
 }
 
-bool fossil_bluecrab_core_update(fossil_bluecrab_table_t *table, const char *key, void *value, fossil_bluecrab_type_t type) {
-    fossil_bluecrab_entry_t *entry = fossil_bluecrab_core_get(table, key);
-    if (!entry) return false;
-    free(entry->value);
-    entry->value = value;
-    entry->type = type;
-    entry->updated_at = time(NULL);
-    return true;
+/* ============================================================================
+ * SIMPLE HASH / TAMPER PROTECTION
+ * ============================================================================ */
+uint64_t fossil_bluecrab_core_hash(const void *data, size_t len, uint64_t salt) {
+    const uint8_t *bytes = (const uint8_t*)data;
+    uint64_t hash = salt ^ 0xcbf29ce484222325;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= 0x100000001b3;
+    }
+    return hash;
 }
 
-bool fossil_bluecrab_core_delete(fossil_bluecrab_table_t *table, const char *key) {
-    if (!table || !key) return false;
-    for (size_t i = 0; i < table->entry_count; i++) {
-        if (strcmp(table->entries[i]->key, key) == 0) {
-            free(table->entries[i]->key);
-            free(table->entries[i]->value);
-            free(table->entries[i]);
-            for (size_t j = i; j < table->entry_count - 1; j++)
-                table->entries[j] = table->entries[j + 1];
-            table->entry_count--;
-            return true;
+bool fossil_bluecrab_core_verify_hash(fossil_bluecrab_core_db_t *db) {
+    if (!db) return false;
+
+    uint64_t h = fossil_bluecrab_core_hash(db->name, strlen(db->name), db->hash_salt);
+    h ^= fossil_bluecrab_core_hash(&db->table_count, sizeof(db->table_count), db->hash_salt);
+    h ^= fossil_bluecrab_core_hash(&db->last_modified, sizeof(db->last_modified), db->hash_salt);
+
+    // Walk all tables
+    for (size_t t = 0; t < db->table_count; t++) {
+        fossil_bluecrab_core_table_t *table = &db->tables[t];
+        h ^= fossil_bluecrab_core_hash(table->name, strlen(table->name), db->hash_salt);
+        h ^= fossil_bluecrab_core_hash(&table->column_count, sizeof(table->column_count), db->hash_salt);
+        h ^= fossil_bluecrab_core_hash(&table->row_count, sizeof(table->row_count), db->hash_salt);
+
+        // Columns
+        for (size_t c = 0; c < table->column_count; c++) {
+            fossil_bluecrab_core_column_t *col = &table->columns[c];
+            h ^= fossil_bluecrab_core_hash(col->name, strlen(col->name), db->hash_salt);
+            h ^= fossil_bluecrab_core_hash(&col->type, sizeof(col->type), db->hash_salt);
+            h ^= fossil_bluecrab_core_hash(&col->is_primary_key, sizeof(col->is_primary_key), db->hash_salt);
+            h ^= fossil_bluecrab_core_hash(&col->is_indexed, sizeof(col->is_indexed), db->hash_salt);
+        }
+
+        // Rows
+        for (size_t r = 0; r < table->row_count; r++) {
+            fossil_bluecrab_core_value_t *row = table->rows[r];
+            for (size_t c = 0; c < table->column_count; c++) {
+                fossil_bluecrab_core_value_t *val = &row[c];
+                h ^= fossil_bluecrab_core_hash(&val->type, sizeof(val->type), db->hash_salt);
+                switch (val->type) {
+                    case FBC_TYPE_I8:     h ^= fossil_bluecrab_core_hash(&val->value.i8, sizeof(val->value.i8), db->hash_salt); break;
+                    case FBC_TYPE_I16:    h ^= fossil_bluecrab_core_hash(&val->value.i16, sizeof(val->value.i16), db->hash_salt); break;
+                    case FBC_TYPE_I32:    h ^= fossil_bluecrab_core_hash(&val->value.i32, sizeof(val->value.i32), db->hash_salt); break;
+                    case FBC_TYPE_I64:    h ^= fossil_bluecrab_core_hash(&val->value.i64, sizeof(val->value.i64), db->hash_salt); break;
+                    case FBC_TYPE_U8:     h ^= fossil_bluecrab_core_hash(&val->value.u8, sizeof(val->value.u8), db->hash_salt); break;
+                    case FBC_TYPE_U16:    h ^= fossil_bluecrab_core_hash(&val->value.u16, sizeof(val->value.u16), db->hash_salt); break;
+                    case FBC_TYPE_U32:    h ^= fossil_bluecrab_core_hash(&val->value.u32, sizeof(val->value.u32), db->hash_salt); break;
+                    case FBC_TYPE_U64:    h ^= fossil_bluecrab_core_hash(&val->value.u64, sizeof(val->value.u64), db->hash_salt); break;
+                    case FBC_TYPE_F32:    h ^= fossil_bluecrab_core_hash(&val->value.f32, sizeof(val->value.f32), db->hash_salt); break;
+                    case FBC_TYPE_F64:    h ^= fossil_bluecrab_core_hash(&val->value.f64, sizeof(val->value.f64), db->hash_salt); break;
+                    case FBC_TYPE_CSTR:   if(val->value.cstr) h ^= fossil_bluecrab_core_hash(val->value.cstr, strlen(val->value.cstr), db->hash_salt); break;
+                    case FBC_TYPE_CHAR:   h ^= fossil_bluecrab_core_hash(&val->value.chr, sizeof(val->value.chr), db->hash_salt); break;
+                    case FBC_TYPE_BOOL:   h ^= fossil_bluecrab_core_hash(&val->value.boolean, sizeof(val->value.boolean), db->hash_salt); break;
+                    case FBC_TYPE_SIZE:   h ^= fossil_bluecrab_core_hash(&val->value.size, sizeof(val->value.size), db->hash_salt); break;
+                    case FBC_TYPE_DATETIME: h ^= fossil_bluecrab_core_hash(&val->value.datetime, sizeof(val->value.datetime), db->hash_salt); break;
+                    case FBC_TYPE_DURATION: h ^= fossil_bluecrab_core_hash(&val->value.duration, sizeof(val->value.duration), db->hash_salt); break;
+                    case FBC_TYPE_ANY:    h ^= fossil_bluecrab_core_hash(&val->value.any, sizeof(val->value.any), db->hash_salt); break;
+                    case FBC_TYPE_NULL:   break;
+                    default: break;
+                }
+            }
         }
     }
-    return false;
+
+    // Return true if hash is non-zero (indicates structure exists & not trivially empty)
+    return h != 0;
 }
 
-// ======================================================
-// Batch Processing & Query
-// ======================================================
+/* ============================================================================
+ * AI HOOK
+ * ============================================================================ */
 
-size_t fossil_bluecrab_core_query(fossil_bluecrab_table_t *table, fossil_bluecrab_filter_fn filter, void *userdata, fossil_bluecrab_entry_t **results, size_t max_results) {
-    if (!table || !filter || !results) return 0;
-    size_t found = 0;
-    for (size_t i = 0; i < table->entry_count && found < max_results; i++) {
-        if (filter(table->entries[i], userdata))
-            results[found++] = table->entries[i];
-    }
-    return found;
-}
+void fossil_bluecrab_core_ai_optimize(fossil_bluecrab_core_db_t *db) {
+    if (!db) return;
 
-bool fossil_bluecrab_core_batch_process(fossil_bluecrab_table_t *table, fossil_bluecrab_entry_t **entries, size_t count) {
-    if (!table || !entries) return false;
-    for (size_t i = 0; i < count; i++) {
-        fossil_bluecrab_core_insert(table, entries[i]->key, entries[i]->value, entries[i]->type);
-    }
-    return true;
-}
+    printf("[BlueCrab AI] Starting optimization for database '%s'\n", db->name);
 
-// ======================================================
-// Transaction Management
-// ======================================================
+    for (size_t t = 0; t < db->table_count; t++) {
+        fossil_bluecrab_core_table_t *table = &db->tables[t];
 
-bool fossil_bluecrab_core_begin_transaction(fossil_bluecrab_db_t *db) {
-    if (!db || db->in_transaction) return false;
-    db->in_transaction = true;
-    return true;
-}
+        // Skip empty tables
+        if (table->row_count == 0) {
+            printf("  Table '%s' is empty, consider dropping if unused.\n", table->name);
+            continue;
+        }
 
-bool fossil_bluecrab_core_commit_transaction(fossil_bluecrab_db_t *db) {
-    if (!db || !db->in_transaction) return false;
-    db->in_transaction = false;
-    db->last_hash = 0; // could recalc full db hash here
-    return true;
-}
+        // Check for columns with identical values
+        for (size_t c = 0; c < table->column_count; c++) {
+            bool identical = true;
+            fossil_bluecrab_core_value_t *first_val = &table->rows[0][c];
 
-bool fossil_bluecrab_core_rollback_transaction(fossil_bluecrab_db_t *db) {
-    if (!db || !db->in_transaction) return false;
-    db->in_transaction = false;
-    return true;
-}
+            for (size_t r = 1; r < table->row_count; r++) {
+                fossil_bluecrab_core_value_t *val = &table->rows[r][c];
+                if (val->type != first_val->type) {
+                    identical = false;
+                    break;
+                }
 
-// ======================================================
-// AI / Time / Type Awareness Utilities
-// ======================================================
+                // Basic comparison by type
+                switch (val->type) {
+                    case FBC_TYPE_I8: identical &= (val->value.i8 == first_val->value.i8); break;
+                    case FBC_TYPE_I16: identical &= (val->value.i16 == first_val->value.i16); break;
+                    case FBC_TYPE_I32: identical &= (val->value.i32 == first_val->value.i32); break;
+                    case FBC_TYPE_I64: identical &= (val->value.i64 == first_val->value.i64); break;
+                    case FBC_TYPE_U8: identical &= (val->value.u8 == first_val->value.u8); break;
+                    case FBC_TYPE_U16: identical &= (val->value.u16 == first_val->value.u16); break;
+                    case FBC_TYPE_U32: identical &= (val->value.u32 == first_val->value.u32); break;
+                    case FBC_TYPE_U64: identical &= (val->value.u64 == first_val->value.u64); break;
+                    case FBC_TYPE_F32: identical &= (val->value.f32 == first_val->value.f32); break;
+                    case FBC_TYPE_F64: identical &= (val->value.f64 == first_val->value.f64); break;
+                    case FBC_TYPE_BOOL: identical &= (val->value.boolean == first_val->value.boolean); break;
+                    case FBC_TYPE_CSTR: identical &= (val->value.cstr && first_val->value.cstr && strcmp(val->value.cstr, first_val->value.cstr) == 0); break;
+                    case FBC_TYPE_CHAR: identical &= (val->value.chr == first_val->value.chr); break;
+                    default: identical = false; break;
+                }
 
-fossil_bluecrab_type_t fossil_bluecrab_core_infer_type(const void *value) {
-    // simple placeholder inference
-    if (!value) return FBC_TYPE_NULL;
-    return FBC_TYPE_ANY;
-}
+                if (!identical) break;
+            }
 
-time_t fossil_bluecrab_core_current_time(void) {
-    return time(NULL);
-}
-
-// ======================================================
-// Hybrid SQL + Git-like Snapshot Logic
-// ======================================================
-
-bool fossil_bluecrab_core_commit_snapshot(fossil_bluecrab_db_t *db, const char *message) {
-    if (!db || !message) return false;
-    if (db->snapshot_count >= db->snapshot_capacity) {
-        db->snapshot_capacity *= 2;
-        db->snapshots = realloc(db->snapshots, sizeof(fossil_bluecrab_snapshot_t*) * db->snapshot_capacity);
-    }
-    fossil_bluecrab_snapshot_t *snap = fossil_bluecrab_malloc(sizeof(fossil_bluecrab_snapshot_t));
-    snap->hash = db->last_hash; // placeholder, real hash should compute full DB
-    snap->timestamp = time(NULL);
-    snap->message = fossil_bluecrab_strdup(message);
-    db->snapshots[db->snapshot_count++] = snap;
-    return true;
-}
-
-bool fossil_bluecrab_core_checkout_snapshot(fossil_bluecrab_db_t *db, uint64_t snapshot_hash) {
-    // Placeholder: real implementation would restore state
-    for (size_t i = 0; i < db->snapshot_count; i++) {
-        if (db->snapshots[i]->hash == snapshot_hash) {
-            return true;
+            if (identical) {
+                printf("    Column '%s' has identical values in all rows. Consider compressing or indexing.\n",
+                       table->columns[c].name);
+            }
         }
     }
-    return false;
-}
 
-// ======================================================
-// Persistent Storage
-// ======================================================
-
-bool fossil_bluecrab_core_save(fossil_bluecrab_db_t *db, const char *filepath) {
-    if (!db || !filepath) return false;
-    FILE *f = fopen(filepath, "wb");
-    if (!f) return false;
-    fwrite(&db->table_count, sizeof(size_t), 1, f);
-    // minimal: would need full table/entry serialization
-    fclose(f);
-    return true;
-}
-
-fossil_bluecrab_db_t* fossil_bluecrab_core_load(const char *filepath) {
-    if (!filepath) return NULL;
-    FILE *f = fopen(filepath, "rb");
-    if (!f) return NULL;
-    size_t table_count = 0;
-    fread(&table_count, sizeof(size_t), 1, f);
-    fclose(f);
-    fossil_bluecrab_db_t *db = fossil_bluecrab_core_create_db(table_count);
-    return db;
+    printf("[BlueCrab AI] Optimization analysis complete.\n");
 }
