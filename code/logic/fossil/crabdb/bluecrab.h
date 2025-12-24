@@ -258,8 +258,6 @@ fossil_bluecrab_core_type_name(
 
 #ifdef __cplusplus
 }
-#include <string>
-#include <vector>
 #include <memory>
 #include <stdexcept>
 
@@ -269,65 +267,102 @@ namespace bluecrab {
 
 class Core {
 public:
-    Core(const std::string &db_name) {
-        db_ = fossil_bluecrab_core_create_db(db_name.c_str());
-        if (!db_) throw std::runtime_error("Failed to create BlueCrab DB");
+    // Constructor: initialize with storage ops
+    Core(const fossil_bluecrab_core_storage_ops_t& storage_ops) {
+        fossil_bluecrab_core_db_t* db_ptr = nullptr;
+        auto res = fossil_bluecrab_core_init(&db_ptr, &storage_ops);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to initialize Blue Crab core");
+        }
+        db_.reset(db_ptr, [](fossil_bluecrab_core_db_t* db) {
+            fossil_bluecrab_core_shutdown(db);
+        });
     }
 
-    ~Core() {
-        if (db_) fossil_bluecrab_core_destroy_db(db_);
+    // Insert a value, returns record ID
+    uint64_t insert(const fossil_bluecrab_core_value_t& value) {
+        uint64_t record_id = 0;
+        auto res = fossil_bluecrab_core_insert(db_.get(), &value, &record_id);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to insert record");
+        }
+        return record_id;
     }
 
-    // ---------------- Database ----------------
-    const std::string& name() const { return db_name_; }
-
-    bool verify_hash() const {
-        return fossil_bluecrab_core_verify_hash(db_);
+    // Fetch a record by ID
+    fossil_bluecrab_core_record_t fetch(uint64_t record_id) {
+        fossil_bluecrab_core_record_t record{};
+        auto res = fossil_bluecrab_core_fetch(db_.get(), record_id, &record);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to fetch record");
+        }
+        return record;
     }
 
-    // ---------------- Tables ----------------
-    fossil_bluecrab_core_table_t* create_table(const std::string &table_name) {
-        auto table = fossil_bluecrab_core_create_table(db_, table_name.c_str());
-        if (!table) throw std::runtime_error("Failed to create table");
-        return table;
+    // Verify tamper-evident chain
+    void verify_chain() {
+        auto res = fossil_bluecrab_core_verify_chain(db_.get());
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Tamper detected in chain");
+        }
     }
 
-    bool drop_table(const std::string &table_name) {
-        return fossil_bluecrab_core_drop_table(db_, table_name.c_str());
+    // Rehash all records
+    void rehash_all() {
+        auto res = fossil_bluecrab_core_rehash_all(db_.get());
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to rehash records");
+        }
     }
 
-    size_t table_count() const { return db_ ? db_->table_count : 0; }
-
-    fossil_bluecrab_core_table_t* get_table(size_t index) {
-        if (!db_ || index >= db_->table_count) return nullptr;
-        return &db_->tables[index];
+    // Commit current state (git-style)
+    fossil_bluecrab_core_commit_t commit() {
+        fossil_bluecrab_core_commit_t commit{};
+        auto res = fossil_bluecrab_core_commit(db_.get(), &commit);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to commit database");
+        }
+        return commit;
     }
 
-    // ---------------- Rows ----------------
-    bool insert_row(fossil_bluecrab_core_table_t* table, fossil_bluecrab_core_value_t* values) {
-        return fossil_bluecrab_core_insert_row(table, values);
+    // Checkout a commit
+    void checkout(const fossil_bluecrab_core_hash_t& commit_hash) {
+        auto res = fossil_bluecrab_core_checkout(db_.get(), &commit_hash);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to checkout commit");
+        }
     }
 
-    bool delete_row(fossil_bluecrab_core_table_t* table, size_t row_index) {
-        return fossil_bluecrab_core_delete_row(table, row_index);
+    // Diff between two commits
+    void diff(const fossil_bluecrab_core_hash_t& a, const fossil_bluecrab_core_hash_t& b) {
+        auto res = fossil_bluecrab_core_diff(db_.get(), &a, &b);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to diff commits");
+        }
     }
 
-    fossil_bluecrab_core_value_t* get_value(fossil_bluecrab_core_table_t* table, size_t row_index, const std::string &column_name) {
-        return fossil_bluecrab_core_get_value(table, row_index, column_name.c_str());
+    // AI-oriented scoring
+    void score_record(uint64_t record_id, float delta) {
+        auto res = fossil_bluecrab_core_score_record(db_.get(), record_id, delta);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to score record");
+        }
     }
 
-    // ---------------- Hash / AI ----------------
-    uint64_t compute_hash(const void* data, size_t len, uint64_t salt) const {
-        return fossil_bluecrab_core_hash(data, len, salt);
+    void touch_record(uint64_t record_id) {
+        auto res = fossil_bluecrab_core_touch_record(db_.get(), record_id);
+        if (res != FOSSIL_BLUECRAB_OK) {
+            throw std::runtime_error("Failed to touch record");
+        }
     }
 
-    void ai_optimize() {
-        fossil_bluecrab_core_ai_optimize(db_);
+    // Utility: get type name
+    static const char* type_name(fossil_bluecrab_core_type_t type) {
+        return fossil_bluecrab_core_type_name(type);
     }
 
 private:
-    fossil_bluecrab_core_db_t* db_ = nullptr;
-    std::string db_name_;
+    std::unique_ptr<fossil_bluecrab_core_db_t, void(*)(fossil_bluecrab_core_db_t*)> db_{nullptr, [](fossil_bluecrab_core_db_t* db){ /* dummy */ }};
 };
 
 } // namespace bluecrab
