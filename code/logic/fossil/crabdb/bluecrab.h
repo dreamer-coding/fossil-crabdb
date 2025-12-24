@@ -35,101 +35,226 @@ extern "C" {
 #endif
 
 /* ============================================================================
- * BLUECRAB CORE TYPES
- * ============================================================================ */
-typedef enum {
-    FBC_TYPE_I8, FBC_TYPE_I16, FBC_TYPE_I32, FBC_TYPE_I64,
-    FBC_TYPE_U8, FBC_TYPE_U16, FBC_TYPE_U32, FBC_TYPE_U64,
-    FBC_TYPE_F32, FBC_TYPE_F64,
-    FBC_TYPE_CSTR, FBC_TYPE_CHAR,
-    FBC_TYPE_BOOL,
-    FBC_TYPE_HEX, FBC_TYPE_OCT, FBC_TYPE_BIN,
-    FBC_TYPE_SIZE, FBC_TYPE_DATETIME, FBC_TYPE_DURATION,
-    FBC_TYPE_ANY, FBC_TYPE_NULL
+ * Versioning
+ * ========================================================================== */
+
+#define FOSSIL_BLUECRAB_CORE_VERSION_MAJOR 1
+#define FOSSIL_BLUECRAB_CORE_VERSION_MINOR 0
+#define FOSSIL_BLUECRAB_CORE_VERSION_PATCH 0
+
+/* ============================================================================
+ * Result Codes
+ * ========================================================================== */
+
+typedef enum fossil_bluecrab_core_result {
+    FOSSIL_BLUECRAB_OK = 0,
+    FOSSIL_BLUECRAB_ERR_GENERIC,
+    FOSSIL_BLUECRAB_ERR_INVALID_ARG,
+    FOSSIL_BLUECRAB_ERR_IO,
+    FOSSIL_BLUECRAB_ERR_CORRUPT,
+    FOSSIL_BLUECRAB_ERR_TAMPERED,
+    FOSSIL_BLUECRAB_ERR_NOT_FOUND,
+    FOSSIL_BLUECRAB_ERR_TYPE_MISMATCH,
+    FOSSIL_BLUECRAB_ERR_UNSUPPORTED
+} fossil_bluecrab_core_result_t;
+
+/* ============================================================================
+ * Type System
+ * ========================================================================== */
+
+typedef enum fossil_bluecrab_core_type {
+    /* Signed integers */
+    FOSSIL_BLUECRAB_TYPE_I8,
+    FOSSIL_BLUECRAB_TYPE_I16,
+    FOSSIL_BLUECRAB_TYPE_I32,
+    FOSSIL_BLUECRAB_TYPE_I64,
+
+    /* Unsigned integers */
+    FOSSIL_BLUECRAB_TYPE_U8,
+    FOSSIL_BLUECRAB_TYPE_U16,
+    FOSSIL_BLUECRAB_TYPE_U32,
+    FOSSIL_BLUECRAB_TYPE_U64,
+
+    /* Floating point */
+    FOSSIL_BLUECRAB_TYPE_F32,
+    FOSSIL_BLUECRAB_TYPE_F64,
+
+    /* Text */
+    FOSSIL_BLUECRAB_TYPE_CSTR,
+    FOSSIL_BLUECRAB_TYPE_CHAR,
+
+    /* Boolean */
+    FOSSIL_BLUECRAB_TYPE_BOOL,
+
+    /* Extended */
+    FOSSIL_BLUECRAB_TYPE_HEX,
+    FOSSIL_BLUECRAB_TYPE_OCT,
+    FOSSIL_BLUECRAB_TYPE_BIN,
+    FOSSIL_BLUECRAB_TYPE_SIZE,
+    FOSSIL_BLUECRAB_TYPE_DATETIME,
+    FOSSIL_BLUECRAB_TYPE_DURATION,
+
+    /* Generic */
+    FOSSIL_BLUECRAB_TYPE_ANY,
+    FOSSIL_BLUECRAB_TYPE_NULL
 } fossil_bluecrab_core_type_t;
 
 /* ============================================================================
- * VALUE STORAGE
- * ============================================================================ */
-typedef struct {
+ * Time Awareness
+ * ========================================================================== */
+
+typedef struct fossil_bluecrab_core_time {
+    int64_t wall_time_ns;      /* Unix epoch nanoseconds */
+    int64_t monotonic_ns;      /* Monotonic time for ordering */
+} fossil_bluecrab_core_time_t;
+
+/* ============================================================================
+ * Value Container
+ * ========================================================================== */
+
+typedef struct fossil_bluecrab_core_value {
     fossil_bluecrab_core_type_t type;
-    union {
-        int8_t   i8;
-        int16_t  i16;
-        int32_t  i32;
-        int64_t  i64;
-        uint8_t  u8;
-        uint16_t u16;
-        uint32_t u32;
-        uint64_t u64;
-        float    f32;
-        double   f64;
-        char    *cstr;
-        char     chr;
-        bool     boolean;
-        uint64_t size;
-        struct tm datetime;
-        double   duration;
-        void    *any;
-    } value;
+    size_t size;
+    const void *data;
 } fossil_bluecrab_core_value_t;
 
 /* ============================================================================
- * COLUMN AND TABLE
- * ============================================================================ */
-#define FBC_MAX_COLUMNS 64
+ * Record & Provenance
+ * ========================================================================== */
 
-typedef struct {
-    char name[64];
-    fossil_bluecrab_core_type_t type;
-    bool is_primary_key;
-    bool is_indexed;
-} fossil_bluecrab_core_column_t;
+#define FOSSIL_BLUECRAB_HASH_SIZE 32  /* algorithm-agnostic */
 
-typedef struct {
-    char name[64];
-    size_t row_count;
-    size_t column_count;
-    fossil_bluecrab_core_column_t columns[FBC_MAX_COLUMNS];
-    fossil_bluecrab_core_value_t **rows; // dynamic array of row pointers
-} fossil_bluecrab_core_table_t;
+typedef struct fossil_bluecrab_core_hash {
+    uint8_t bytes[FOSSIL_BLUECRAB_HASH_SIZE];
+} fossil_bluecrab_core_hash_t;
 
-/* ============================================================================
- * DATABASE STRUCTURE
- * ============================================================================ */
-#define FBC_MAX_TABLES 64
+typedef struct fossil_bluecrab_core_record {
+    uint64_t record_id;
+    fossil_bluecrab_core_time_t timestamp;
+    fossil_bluecrab_core_value_t value;
 
-typedef struct {
-    char name[64];
-    size_t table_count;
-    fossil_bluecrab_core_table_t tables[FBC_MAX_TABLES];
-    uint64_t hash_salt;    // tamper protection
-    time_t last_modified;  // time awareness
-} fossil_bluecrab_core_db_t;
+    /* Tamper-evident chain */
+    fossil_bluecrab_core_hash_t prev_hash;
+    fossil_bluecrab_core_hash_t self_hash;
+
+    /* AI / provenance hooks */
+    float confidence_score;
+    uint32_t usage_count;
+} fossil_bluecrab_core_record_t;
 
 /* ============================================================================
- * ESSENTIAL CORE FUNCTIONS
- * ============================================================================ */
+ * Git-Inspired Database State
+ * ========================================================================== */
 
-// Database lifecycle
-fossil_bluecrab_core_db_t* fossil_bluecrab_core_create_db(const char *name);
-bool fossil_bluecrab_core_destroy_db(fossil_bluecrab_core_db_t *db);
+typedef struct fossil_bluecrab_core_commit {
+    fossil_bluecrab_core_hash_t commit_hash;
+    fossil_bluecrab_core_hash_t parent_hash;
+    fossil_bluecrab_core_time_t timestamp;
+    uint64_t record_count;
+} fossil_bluecrab_core_commit_t;
 
-// Table management
-fossil_bluecrab_core_table_t* fossil_bluecrab_core_create_table(fossil_bluecrab_core_db_t *db, const char *table_name);
-bool fossil_bluecrab_core_drop_table(fossil_bluecrab_core_db_t *db, const char *table_name);
+/* Opaque database handle */
+typedef struct fossil_bluecrab_core_db fossil_bluecrab_core_db_t;
 
-// Row operations
-bool fossil_bluecrab_core_insert_row(fossil_bluecrab_core_table_t *table, fossil_bluecrab_core_value_t *values);
-bool fossil_bluecrab_core_delete_row(fossil_bluecrab_core_table_t *table, size_t row_index);
-fossil_bluecrab_core_value_t* fossil_bluecrab_core_get_value(fossil_bluecrab_core_table_t *table, size_t row_index, const char *column_name);
+/* ============================================================================
+ * Storage Interface (Pluggable)
+ * ========================================================================== */
 
-// Hash / tamper protection
-uint64_t fossil_bluecrab_core_hash(const void *data, size_t len, uint64_t salt);
-bool fossil_bluecrab_core_verify_hash(fossil_bluecrab_core_db_t *db);
+typedef struct fossil_bluecrab_core_storage_ops {
+    void *ctx;
 
-// AI / intelligence hooks
-void fossil_bluecrab_core_ai_optimize(fossil_bluecrab_core_db_t *db);
+    fossil_bluecrab_core_result_t (*read)(
+        void *ctx, uint64_t offset, void *buf, size_t size);
+
+    fossil_bluecrab_core_result_t (*write)(
+        void *ctx, uint64_t offset, const void *buf, size_t size);
+
+    fossil_bluecrab_core_result_t (*flush)(void *ctx);
+} fossil_bluecrab_core_storage_ops_t;
+
+/* ============================================================================
+ * Core Lifecycle
+ * ========================================================================== */
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_init(
+    fossil_bluecrab_core_db_t **out_db,
+    const fossil_bluecrab_core_storage_ops_t *storage_ops);
+
+void
+fossil_bluecrab_core_shutdown(
+    fossil_bluecrab_core_db_t *db);
+
+/* ============================================================================
+ * Record Operations
+ * ========================================================================== */
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_insert(
+    fossil_bluecrab_core_db_t *db,
+    const fossil_bluecrab_core_value_t *value,
+    uint64_t *out_record_id);
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_fetch(
+    fossil_bluecrab_core_db_t *db,
+    uint64_t record_id,
+    fossil_bluecrab_core_record_t *out_record);
+
+/* ============================================================================
+ * Tamper & Integrity
+ * ========================================================================== */
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_verify_chain(
+    fossil_bluecrab_core_db_t *db);
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_rehash_all(
+    fossil_bluecrab_core_db_t *db);
+
+/* ============================================================================
+ * Git-Style Operations
+ * ========================================================================== */
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_commit(
+    fossil_bluecrab_core_db_t *db,
+    fossil_bluecrab_core_commit_t *out_commit);
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_checkout(
+    fossil_bluecrab_core_db_t *db,
+    const fossil_bluecrab_core_hash_t *commit_hash);
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_diff(
+    fossil_bluecrab_core_db_t *db,
+    const fossil_bluecrab_core_hash_t *a,
+    const fossil_bluecrab_core_hash_t *b);
+
+/* ============================================================================
+ * AI-Oriented Introspection
+ * ========================================================================== */
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_score_record(
+    fossil_bluecrab_core_db_t *db,
+    uint64_t record_id,
+    float delta);
+
+fossil_bluecrab_core_result_t
+fossil_bluecrab_core_touch_record(
+    fossil_bluecrab_core_db_t *db,
+    uint64_t record_id);
+
+/* ============================================================================
+ * Utilities
+ * ========================================================================== */
+
+const char *
+fossil_bluecrab_core_type_name(
+    fossil_bluecrab_core_type_t type);
 
 #ifdef __cplusplus
 }
