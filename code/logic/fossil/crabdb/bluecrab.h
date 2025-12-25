@@ -179,6 +179,12 @@ bool fossil_bluecrab_core_branch(fossil_bluecrab_core_db_t *db, const char *bran
 bool fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db);
 
 /* ============================================================================
+ * Persistent Recovery
+ * ============================================================================ */
+bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db);
+bool fossil_bluecrab_core_load(fossil_bluecrab_core_db_t *db);
+
+/* ============================================================================
  * Utility Functions
  * ============================================================================ */
 char *fossil_bluecrab_core_hash_entry(const fossil_bluecrab_core_entry_t *entry);
