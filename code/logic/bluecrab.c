@@ -371,7 +371,6 @@ bool fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db) {
     return true;
 }
 
-/* Save DB snapshot for persistent recovery */
 bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db) {
     if (!db || !db->db_path) return false;
 
@@ -381,44 +380,76 @@ bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db) {
     FILE *f = fopen(tmp_path, "wb");
     if (!f) return false;
 
-    /* Write entry count */
+    /* Save entries */
     fwrite(&db->entry_count, sizeof(size_t), 1, f);
-
-    /* Write each entry */
     for (size_t i = 0; i < db->entry_count; i++) {
         fossil_bluecrab_core_entry_t *e = &db->entries[i];
         size_t key_len = strlen(e->key) + 1;
         fwrite(&key_len, sizeof(size_t), 1, f);
         fwrite(e->key, 1, key_len, f);
-        fwrite(&e->value.type, sizeof(fossil_bluecrab_core_type_t), 1, f);
 
-        /* Only basic types example (expand for strings/extended) */
-        switch (e->value.type) {
-            case FBC_TYPE_I32:
-                fwrite(&e->value.value.i32, sizeof(int32_t), 1, f);
-                break;
-            case FBC_TYPE_CSTR: {
-                size_t len = strlen(e->value.value.cstr) + 1;
-                fwrite(&len, sizeof(size_t), 1, f);
-                fwrite(e->value.value.cstr, 1, len, f);
-                break;
-            }
-            default: break;
+        fwrite(&e->value.type, sizeof(fossil_bluecrab_core_type_t), 1, f);
+        if (e->value.type == FBC_TYPE_I32)
+            fwrite(&e->value.value.i32, sizeof(int32_t), 1, f);
+        else if (e->value.type == FBC_TYPE_CSTR) {
+            size_t len = strlen(e->value.value.cstr) + 1;
+            fwrite(&len, sizeof(size_t), 1, f);
+            fwrite(e->value.value.cstr, 1, len, f);
         }
 
         fwrite(&e->created_at, sizeof(time_t), 1, f);
         fwrite(&e->updated_at, sizeof(time_t), 1, f);
 
-        /* Hash length + hash string */
-        if (e->hash) {
-            size_t hash_len = strlen(e->hash) + 1;
+        size_t hash_len = e->hash ? strlen(e->hash) + 1 : 0;
+        fwrite(&hash_len, sizeof(size_t), 1, f);
+        if (hash_len > 0) fwrite(e->hash, 1, hash_len, f);
+    }
+
+    /* Save commits */
+    fwrite(&db->commit_count, sizeof(size_t), 1, f);
+    for (size_t i = 0; i < db->commit_count; i++) {
+        fossil_bluecrab_core_commit_t *c = &db->commits[i];
+        size_t hash_len = strlen(c->hash) + 1;
+        fwrite(&hash_len, sizeof(size_t), 1, f);
+        fwrite(c->hash, 1, hash_len, f);
+
+        size_t msg_len = strlen(c->message) + 1;
+        fwrite(&msg_len, sizeof(size_t), 1, f);
+        fwrite(c->message, 1, msg_len, f);
+
+        fwrite(&c->timestamp, sizeof(time_t), 1, f);
+
+        /* Snapshot */
+        fwrite(&c->snapshot_count, sizeof(size_t), 1, f);
+        for (size_t j = 0; j < c->snapshot_count; j++) {
+            fossil_bluecrab_core_entry_t *e = &c->snapshot[j];
+            size_t key_len = strlen(e->key) + 1;
+            fwrite(&key_len, sizeof(size_t), 1, f);
+            fwrite(e->key, 1, key_len, f);
+            fwrite(&e->value.type, sizeof(fossil_bluecrab_core_type_t), 1, f);
+            if (e->value.type == FBC_TYPE_I32)
+                fwrite(&e->value.value.i32, sizeof(int32_t), 1, f);
+            else if (e->value.type == FBC_TYPE_CSTR) {
+                size_t len = strlen(e->value.value.cstr) + 1;
+                fwrite(&len, sizeof(size_t), 1, f);
+                fwrite(e->value.value.cstr, 1, len, f);
+            }
+            fwrite(&e->created_at, sizeof(time_t), 1, f);
+            fwrite(&e->updated_at, sizeof(time_t), 1, f);
+            size_t hash_len = e->hash ? strlen(e->hash) + 1 : 0;
             fwrite(&hash_len, sizeof(size_t), 1, f);
-            fwrite(e->hash, 1, hash_len, f);
-        } else {
-            size_t hash_len = 0;
-            fwrite(&hash_len, sizeof(size_t), 1, f);
+            if (hash_len > 0) fwrite(e->hash, 1, hash_len, f);
         }
     }
+
+    /* Save branch & current commit */
+    size_t branch_len = strlen(db->branch) + 1;
+    fwrite(&branch_len, sizeof(size_t), 1, f);
+    fwrite(db->branch, 1, branch_len, f);
+
+    size_t commit_len = db->current_commit ? strlen(db->current_commit) + 1 : 0;
+    fwrite(&commit_len, sizeof(size_t), 1, f);
+    if (commit_len > 0) fwrite(db->current_commit, 1, commit_len, f);
 
     fclose(f);
 
@@ -429,37 +460,26 @@ bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db) {
 
 bool fossil_bluecrab_core_load(fossil_bluecrab_core_db_t *db) {
     if (!db || !db->db_path) return false;
-
     FILE *f = fopen(db->db_path, "rb");
     if (!f) return false;
 
-    size_t entry_count = 0;
-    fread(&entry_count, sizeof(size_t), 1, f);
-    db->entries = malloc(sizeof(fossil_bluecrab_core_entry_t) * entry_count);
-    db->entry_count = entry_count;
-
-    for (size_t i = 0; i < entry_count; i++) {
+    fread(&db->entry_count, sizeof(size_t), 1, f);
+    db->entries = malloc(sizeof(fossil_bluecrab_core_entry_t) * db->entry_count);
+    for (size_t i = 0; i < db->entry_count; i++) {
         fossil_bluecrab_core_entry_t *e = &db->entries[i];
-
         size_t key_len;
         fread(&key_len, sizeof(size_t), 1, f);
         e->key = malloc(key_len);
         fread(e->key, 1, key_len, f);
 
         fread(&e->value.type, sizeof(fossil_bluecrab_core_type_t), 1, f);
-
-        switch (e->value.type) {
-            case FBC_TYPE_I32:
-                fread(&e->value.value.i32, sizeof(int32_t), 1, f);
-                break;
-            case FBC_TYPE_CSTR: {
-                size_t str_len;
-                fread(&str_len, sizeof(size_t), 1, f);
-                e->value.value.cstr = malloc(str_len);
-                fread(e->value.value.cstr, 1, str_len, f);
-                break;
-            }
-            default: break;
+        if (e->value.type == FBC_TYPE_I32)
+            fread(&e->value.value.i32, sizeof(int32_t), 1, f);
+        else if (e->value.type == FBC_TYPE_CSTR) {
+            size_t len;
+            fread(&len, sizeof(size_t), 1, f);
+            e->value.value.cstr = malloc(len);
+            fread(e->value.value.cstr, 1, len, f);
         }
 
         fread(&e->created_at, sizeof(time_t), 1, f);
@@ -470,12 +490,71 @@ bool fossil_bluecrab_core_load(fossil_bluecrab_core_db_t *db) {
         if (hash_len > 0) {
             e->hash = malloc(hash_len);
             fread(e->hash, 1, hash_len, f);
-        } else {
-            e->hash = NULL;
+        } else e->hash = NULL;
+    }
+
+    /* Commits */
+    fread(&db->commit_count, sizeof(size_t), 1, f);
+    db->commits = malloc(sizeof(fossil_bluecrab_core_commit_t) * db->commit_count);
+    for (size_t i = 0; i < db->commit_count; i++) {
+        fossil_bluecrab_core_commit_t *c = &db->commits[i];
+
+        size_t hash_len;
+        fread(&hash_len, sizeof(size_t), 1, f);
+        c->hash = malloc(hash_len);
+        fread(c->hash, 1, hash_len, f);
+
+        size_t msg_len;
+        fread(&msg_len, sizeof(size_t), 1, f);
+        c->message = malloc(msg_len);
+        fread(c->message, 1, msg_len, f);
+
+        fread(&c->timestamp, sizeof(time_t), 1, f);
+
+        fread(&c->snapshot_count, sizeof(size_t), 1, f);
+        c->snapshot = malloc(sizeof(fossil_bluecrab_core_entry_t) * c->snapshot_count);
+        for (size_t j = 0; j < c->snapshot_count; j++) {
+            fossil_bluecrab_core_entry_t *e = &c->snapshot[j];
+            size_t key_len;
+            fread(&key_len, sizeof(size_t), 1, f);
+            e->key = malloc(key_len);
+            fread(e->key, 1, key_len, f);
+
+            fread(&e->value.type, sizeof(fossil_bluecrab_core_type_t), 1, f);
+            if (e->value.type == FBC_TYPE_I32)
+                fread(&e->value.value.i32, sizeof(int32_t), 1, f);
+            else if (e->value.type == FBC_TYPE_CSTR) {
+                size_t len;
+                fread(&len, sizeof(size_t), 1, f);
+                e->value.value.cstr = malloc(len);
+                fread(e->value.value.cstr, 1, len, f);
+            }
+
+            fread(&e->created_at, sizeof(time_t), 1, f);
+            fread(&e->updated_at, sizeof(time_t), 1, f);
+
+            size_t hash_len;
+            fread(&hash_len, sizeof(size_t), 1, f);
+            if (hash_len > 0) {
+                e->hash = malloc(hash_len);
+                fread(e->hash, 1, hash_len, f);
+            } else e->hash = NULL;
         }
     }
+
+    /* Branch & current commit */
+    size_t branch_len;
+    fread(&branch_len, sizeof(size_t), 1, f);
+    db->branch = malloc(branch_len);
+    fread(db->branch, 1, branch_len, f);
+
+    size_t commit_len;
+    fread(&commit_len, sizeof(size_t), 1, f);
+    if (commit_len > 0) {
+        db->current_commit = malloc(commit_len);
+        fread(db->current_commit, 1, commit_len, f);
+    } else db->current_commit = NULL;
 
     fclose(f);
     return true;
 }
-
