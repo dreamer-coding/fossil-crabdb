@@ -371,6 +371,209 @@ bool fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db) {
     return true;
 }
 
+/* ============================================================================
+ * Utility Functions
+ * ============================================================================ */
+static bool string_matches_pattern(const char *str, const char *pattern) {
+    if (!str || !pattern) return false;
+    return strstr(str, pattern) != NULL; // simple substring match
+}
+
+static fossil_bluecrab_core_entry_t *copy_entry(const fossil_bluecrab_core_entry_t *entry) {
+    fossil_bluecrab_core_entry_t *e = malloc(sizeof(fossil_bluecrab_core_entry_t));
+    e->key = strdup(entry->key);
+    e->value = fossil_bluecrab_core_value_copy(&entry->value);
+    e->created_at = entry->created_at;
+    e->updated_at = entry->updated_at;
+    e->metadata = entry->metadata ? strdup(entry->metadata) : NULL;
+    e->hash = entry->hash ? strdup(entry->hash) : NULL;
+    return e;
+}
+
+/* ============================================================================
+ * Query / Search Operations (NoSQL-style)
+ * ============================================================================ */
+size_t fossil_bluecrab_core_find_keys(fossil_bluecrab_core_db_t *db,
+                                      const char *pattern,
+                                      char ***out_keys) {
+    if (!db || !pattern || !out_keys) return 0;
+
+    size_t count = 0;
+    for (size_t i = 0; i < db->entry_count; i++)
+        if (string_matches_pattern(db->entries[i].key, pattern)) count++;
+
+    *out_keys = malloc(sizeof(char*) * count);
+    size_t j = 0;
+    for (size_t i = 0; i < db->entry_count; i++) {
+        if (string_matches_pattern(db->entries[i].key, pattern))
+            (*out_keys)[j++] = strdup(db->entries[i].key);
+    }
+    return count;
+}
+
+size_t fossil_bluecrab_core_find_entries(fossil_bluecrab_core_db_t *db,
+                                         const char *pattern,
+                                         fossil_bluecrab_core_entry_t **out_entries) {
+    if (!db || !pattern || !out_entries) return 0;
+
+    size_t count = 0;
+    for (size_t i = 0; i < db->entry_count; i++)
+        if (string_matches_pattern(db->entries[i].key, pattern)) count++;
+
+    *out_entries = malloc(sizeof(fossil_bluecrab_core_entry_t) * count);
+    size_t j = 0;
+    for (size_t i = 0; i < db->entry_count; i++) {
+        if (string_matches_pattern(db->entries[i].key, pattern))
+            (*out_entries)[j++] = *copy_entry(&db->entries[i]);
+    }
+    return count;
+}
+
+bool fossil_bluecrab_core_clear(fossil_bluecrab_core_db_t *db) {
+    if (!db) return false;
+    for (size_t i = 0; i < db->entry_count; i++) {
+        fossil_bluecrab_core_value_free(&db->entries[i].value);
+        free(db->entries[i].key);
+        free(db->entries[i].metadata);
+        free(db->entries[i].hash);
+    }
+    free(db->entries);
+    db->entries = NULL;
+    db->entry_count = 0;
+    return true;
+}
+
+/* ============================================================================
+ * Merge / Diff Operations (Git-style)
+ * ============================================================================ */
+bool fossil_bluecrab_core_diff(fossil_bluecrab_core_db_t *db,
+                               const char *commit_a,
+                               const char *commit_b) {
+    if (!db || !commit_a || !commit_b) return false;
+    printf("[BlueCrab] Diff between %s and %s (placeholder)\n", commit_a, commit_b);
+    return true; // placeholder: implement actual diff logic
+}
+
+bool fossil_bluecrab_core_merge(fossil_bluecrab_core_db_t *db,
+                                const char *source_commit,
+                                const char *target_commit,
+                                bool auto_resolve_conflicts) {
+    if (!db || !source_commit || !target_commit) return false;
+    printf("[BlueCrab] Merge %s into %s (auto_resolve=%d, placeholder)\n",
+           source_commit, target_commit, auto_resolve_conflicts);
+    return true; // placeholder: implement merge logic
+}
+
+/* ============================================================================
+ * Tagging / Bookmarking Commits
+ * ============================================================================ */
+typedef struct fossil_bluecrab_core_tag_s {
+    char *name;
+    char *commit_hash;
+    struct fossil_bluecrab_core_tag_s *next;
+} fossil_bluecrab_core_tag_t;
+
+static fossil_bluecrab_core_tag_t *tag_head = NULL;
+
+bool fossil_bluecrab_core_tag_commit(fossil_bluecrab_core_db_t *db,
+                                     const char *commit_hash,
+                                     const char *tag_name) {
+    if (!db || !commit_hash || !tag_name) return false;
+
+    fossil_bluecrab_core_tag_t *t = malloc(sizeof(fossil_bluecrab_core_tag_t));
+    t->name = strdup(tag_name);
+    t->commit_hash = strdup(commit_hash);
+    t->next = tag_head;
+    tag_head = t;
+
+    printf("[BlueCrab] Tagged commit %s as %s\n", commit_hash, tag_name);
+    return true;
+}
+
+char *fossil_bluecrab_core_get_tagged_commit(fossil_bluecrab_core_db_t *db,
+                                             const char *tag_name) {
+    fossil_bluecrab_core_tag_t *t = tag_head;
+    while (t) {
+        if (strcmp(t->name, tag_name) == 0) return t->commit_hash;
+        t = t->next;
+    }
+    return NULL;
+}
+
+/* ============================================================================
+ * Entry Metadata / Extended Utilities
+ * ============================================================================ */
+bool fossil_bluecrab_core_set_metadata(fossil_bluecrab_core_db_t *db,
+                                       const char *key,
+                                       const char *metadata) {
+    if (!db || !key) return false;
+    for (size_t i = 0; i < db->entry_count; i++) {
+        if (strcmp(db->entries[i].key, key) == 0) {
+            free(db->entries[i].metadata);
+            db->entries[i].metadata = metadata ? strdup(metadata) : NULL;
+            return true;
+        }
+    }
+    return false;
+}
+
+char *fossil_bluecrab_core_get_metadata(fossil_bluecrab_core_db_t *db,
+                                        const char *key) {
+    if (!db || !key) return NULL;
+    for (size_t i = 0; i < db->entry_count; i++)
+        if (strcmp(db->entries[i].key, key) == 0) return db->entries[i].metadata;
+    return NULL;
+}
+
+bool fossil_bluecrab_core_has_key(fossil_bluecrab_core_db_t *db,
+                                  const char *key) {
+    if (!db || !key) return false;
+    for (size_t i = 0; i < db->entry_count; i++)
+        if (strcmp(db->entries[i].key, key) == 0) return true;
+    return false;
+}
+
+/* ============================================================================
+ * Advanced Hash / Tamper Detection
+ * ============================================================================ */
+bool fossil_bluecrab_core_verify_entry(fossil_bluecrab_core_entry_t *entry) {
+    if (!entry) return false;
+    if (!entry->hash) return false;
+    char *computed = fossil_bluecrab_core_hash_entry(entry);
+    bool ok = computed && strcmp(computed, entry->hash) == 0;
+    free(computed);
+    return ok;
+}
+
+bool fossil_bluecrab_core_verify_db(fossil_bluecrab_core_db_t *db) {
+    if (!db) return false;
+    for (size_t i = 0; i < db->entry_count; i++)
+        if (!fossil_bluecrab_core_verify_entry(&db->entries[i])) return false;
+    return true;
+}
+
+/* ============================================================================
+ * Utility / Debug
+ * ============================================================================ */
+void fossil_bluecrab_core_print_entry(fossil_bluecrab_core_entry_t *entry) {
+    if (!entry) return;
+    printf("Key: %s, Type: %s, Created: %ld, Updated: %ld\n",
+           entry->key,
+           fossil_bluecrab_core_type_to_string(entry->value.type),
+           entry->created_at,
+           entry->updated_at);
+    if (entry->metadata) printf("Metadata: %s\n", entry->metadata);
+}
+
+void fossil_bluecrab_core_print_db(fossil_bluecrab_core_db_t *db) {
+    if (!db) return;
+    printf("Database Path: %s\n", db->db_path);
+    printf("Entries: %zu\n", db->entry_count);
+    for (size_t i = 0; i < db->entry_count; i++) {
+        fossil_bluecrab_core_print_entry(&db->entries[i]);
+    }
+}
+
 bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db) {
     if (!db || !db->db_path) return false;
 
