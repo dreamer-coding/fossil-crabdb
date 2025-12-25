@@ -36,58 +36,68 @@ extern "C" {
 
 /* ============================================================================
  * Blue Crab Database Core
- *
- * Portable, multi-purpose, verbose core for Fossil Logic.
- * Features:
- * - Persistent data storage
- * - Cold-core tamper protection
- * - Type and time awareness
- * - AI-friendly operations
- * - Git-inspired hybrid database operations
- * - Verbose API for sub-libraries
+ * ----------------------------------------------------------------------------
+ * Portable, multi-purpose database core for sub-libraries. Supports:
+ *  - Persistent storage
+ *  - Cold-core tamper protection
+ *  - Time awareness
+ *  - Type awareness
+ *  - Git-based logic for database operations
+ *  - Hybrid of Git and NoSQL
  * ============================================================================ */
 
-/* ----------------------------
- * Type Definitions
- * ---------------------------- */
-
+/* ============================================================================
+ * Data Types
+ * ---------------------------------------------------------------------------
+ * Signed Int: "i8", "i16", "i32", "i64"
+ * Unsigned Int: "u8", "u16", "u32", "u64"
+ * Floating: "f32", "f64"
+ * String/Text: "cstr", "char"
+ * Boolean: "bool"
+ * Extended: "hex", "oct", "bin", "size", "datetime", "duration"
+ * Generic: "any", "null"
+ * ============================================================================ */
 typedef enum {
-    FOSSIL_BLUECRAB_TYPE_NULL,
-    FOSSIL_BLUECRAB_TYPE_BOOL,
+    FBC_TYPE_NULL = 0,
+    FBC_TYPE_ANY,
 
     /* Signed integers */
-    FOSSIL_BLUECRAB_TYPE_I8,
-    FOSSIL_BLUECRAB_TYPE_I16,
-    FOSSIL_BLUECRAB_TYPE_I32,
-    FOSSIL_BLUECRAB_TYPE_I64,
+    FBC_TYPE_I8,
+    FBC_TYPE_I16,
+    FBC_TYPE_I32,
+    FBC_TYPE_I64,
 
     /* Unsigned integers */
-    FOSSIL_BLUECRAB_TYPE_U8,
-    FOSSIL_BLUECRAB_TYPE_U16,
-    FOSSIL_BLUECRAB_TYPE_U32,
-    FOSSIL_BLUECRAB_TYPE_U64,
+    FBC_TYPE_U8,
+    FBC_TYPE_U16,
+    FBC_TYPE_U32,
+    FBC_TYPE_U64,
 
-    /* Floating point */
-    FOSSIL_BLUECRAB_TYPE_F32,
-    FOSSIL_BLUECRAB_TYPE_F64,
+    /* Floating points */
+    FBC_TYPE_F32,
+    FBC_TYPE_F64,
 
-    /* Strings/Text */
-    FOSSIL_BLUECRAB_TYPE_CSTR,
-    FOSSIL_BLUECRAB_TYPE_CHAR,
+    /* Strings */
+    FBC_TYPE_CSTR,
+    FBC_TYPE_CHAR,
+
+    /* Boolean */
+    FBC_TYPE_BOOL,
 
     /* Extended types */
-    FOSSIL_BLUECRAB_TYPE_HEX,
-    FOSSIL_BLUECRAB_TYPE_OCT,
-    FOSSIL_BLUECRAB_TYPE_BIN,
-    FOSSIL_BLUECRAB_TYPE_SIZE,
-    FOSSIL_BLUECRAB_TYPE_DATETIME,
-    FOSSIL_BLUECRAB_TYPE_DURATION,
-
-    /* Generic */
-    FOSSIL_BLUECRAB_TYPE_ANY
+    FBC_TYPE_HEX,
+    FBC_TYPE_OCT,
+    FBC_TYPE_BIN,
+    FBC_TYPE_SIZE,
+    FBC_TYPE_DATETIME,
+    FBC_TYPE_DURATION
 } fossil_bluecrab_core_type_t;
 
-/* Generic data container */
+/* ============================================================================
+ * Generic Value Container
+ * ---------------------------------------------------------------------------
+ * Holds any value with type awareness
+ * ============================================================================ */
 typedef struct {
     fossil_bluecrab_core_type_t type;
     union {
@@ -104,168 +114,181 @@ typedef struct {
         float    f32;
         double   f64;
 
-        char    *cstr;
-        char     c;
+        char     *cstr;
+        char     ch;
 
         bool     boolean;
 
-        /* Extended representations as strings for flexibility */
-        char    *hex;
-        char    *oct;
-        char    *bin;
+        /* Extended values as string representation */
+        char     *hex;
+        char     *oct;
+        char     *bin;
         size_t   size;
         time_t   datetime;
         double   duration;
-
-        void    *any;
     } value;
-} fossil_bluecrab_core_data_t;
+} fossil_bluecrab_core_value_t;
 
-/* ----------------------------
- * Database Structures
- * ---------------------------- */
-
-/* Each record in the database */
-typedef struct fossil_bluecrab_core_record_s {
-    char *key;                          /* Unique key */
-    fossil_bluecrab_core_data_t data;   /* Typed data */
-    time_t timestamp;                   /* Last modification */
-    struct fossil_bluecrab_core_record_s *next;
-} fossil_bluecrab_core_record_t;
-
-/* Database handle */
+/* ============================================================================
+ * Database Entry
+ * ---------------------------------------------------------------------------
+ * Each entry has a key, value, timestamp, and optional metadata
+ * ============================================================================ */
 typedef struct {
-    char *name;                         /* Database name */
-    fossil_bluecrab_core_record_t *head;
-    bool dirty;                         /* Tracks uncommitted changes */
+    char *key;
+    fossil_bluecrab_core_value_t value;
+    time_t created_at;
+    time_t updated_at;
+    char *metadata; /* Optional JSON or string metadata */
+    char *hash;     /* Cold-core tamper protection hash */
+} fossil_bluecrab_core_entry_t;
+
+/* ============================================================================
+ * Database Object
+ * ---------------------------------------------------------------------------
+ * Core database structure with Git-like versioning
+ * ============================================================================ */
+typedef struct {
+    char *db_path; /* File system path for persistence */
+    size_t entry_count;
+    fossil_bluecrab_core_entry_t *entries;
+
+    /* Git-like versioning information */
+    char *current_commit;
+    char *branch;
 } fossil_bluecrab_core_db_t;
 
-/* ----------------------------
- * Core Database Functions
- * ---------------------------- */
+/* ============================================================================
+ * Initialization / Shutdown
+ * ============================================================================ */
+bool fossil_bluecrab_core_init(fossil_bluecrab_core_db_t *db, const char *path);
+bool fossil_bluecrab_core_shutdown(fossil_bluecrab_core_db_t *db);
 
-/* Initialize database handle */
-void fossil_bluecrab_core_init_db(fossil_bluecrab_core_db_t *db, const char *name);
+/* ============================================================================
+ * CRUD Operations
+ * ============================================================================ */
+bool fossil_bluecrab_core_set(fossil_bluecrab_core_db_t *db,
+                              const char *key,
+                              fossil_bluecrab_core_value_t value);
 
-/* Destroy database and free memory */
-void fossil_bluecrab_core_destroy_db(fossil_bluecrab_core_db_t *db);
+bool fossil_bluecrab_core_get(fossil_bluecrab_core_db_t *db,
+                              const char *key,
+                              fossil_bluecrab_core_value_t *out_value);
 
-/* Add or update a record */
-bool fossil_bluecrab_core_set(fossil_bluecrab_core_db_t *db, const char *key, fossil_bluecrab_core_data_t value);
-
-/* Get a record by key */
-bool fossil_bluecrab_core_get(fossil_bluecrab_core_db_t *db, const char *key, fossil_bluecrab_core_data_t *out_value);
-
-/* Delete a record */
 bool fossil_bluecrab_core_delete(fossil_bluecrab_core_db_t *db, const char *key);
 
-/* List all keys */
-size_t fossil_bluecrab_core_list_keys(fossil_bluecrab_core_db_t *db, char ***keys_out);
-
-/* ----------------------------
- * Persistent Storage
- * ---------------------------- */
-
-/* Save database to disk (persistent storage) */
-bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db, const char *filepath);
-
-/* Load database from disk */
-bool fossil_bluecrab_core_load(fossil_bluecrab_core_db_t *db, const char *filepath);
-
-/* ----------------------------
- * Cold-Core Tamper Protection
- * ---------------------------- */
-
-/* Simple hash for tamper detection */
-uint64_t fossil_bluecrab_core_hash_record(fossil_bluecrab_core_record_t *record);
-
-/* Verify database integrity */
-bool fossil_bluecrab_core_verify_integrity(fossil_bluecrab_core_db_t *db);
-
-/* ----------------------------
- * Git-Inspired Operations
- * ---------------------------- */
-
-/* Commit current state */
+/* ============================================================================
+ * Git-like Operations
+ * ============================================================================ */
 bool fossil_bluecrab_core_commit(fossil_bluecrab_core_db_t *db, const char *message);
+bool fossil_bluecrab_core_checkout(fossil_bluecrab_core_db_t *db, const char *commit_hash);
+bool fossil_bluecrab_core_branch(fossil_bluecrab_core_db_t *db, const char *branch_name);
+bool fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db);
 
-/* Rollback to previous commit */
-bool fossil_bluecrab_core_rollback(fossil_bluecrab_core_db_t *db, const char *commit_hash);
+/* ============================================================================
+ * Utility Functions
+ * ============================================================================ */
+char *fossil_bluecrab_core_hash_entry(const fossil_bluecrab_core_entry_t *entry);
+fossil_bluecrab_core_value_t fossil_bluecrab_core_value_copy(const fossil_bluecrab_core_value_t *value);
+void fossil_bluecrab_core_value_free(fossil_bluecrab_core_value_t *value);
 
-/* Show commit log */
-void fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db);
-
-/* ----------------------------
- * Utility & AI Tricks
- * ---------------------------- */
-
-/* Print a record verbosely */
-void fossil_bluecrab_core_print_record(fossil_bluecrab_core_record_t *record);
-
-/* Infer type from generic data (AI-like type awareness) */
-fossil_bluecrab_core_type_t fossil_bluecrab_core_infer_type(void *data, size_t size);
-
-/* Time-aware operations */
-time_t fossil_bluecrab_core_current_time(void);
+/* ============================================================================
+ * Time and Type Awareness
+ * ============================================================================ */
+const char *fossil_bluecrab_core_type_to_string(fossil_bluecrab_core_type_t type);
+fossil_bluecrab_core_type_t fossil_bluecrab_core_string_to_type(const char *type_str);
 
 #ifdef __cplusplus
 }
 #include <string>
-#include <vector>
 #include <memory>
+#include <optional>
+#include <vector>
 
 namespace fossil {
 
 namespace bluecrab {
 
+/* ============================================================================
+ * C++ Wrapper for Blue Crab Core
+ * ----------------------------------------------------------------------------
+ * Provides RAII, type-safe methods, and std::string integration.
+ * Methods use snake_case naming but call the underlying C functions.
+ * ============================================================================ */
 class Core {
 public:
-    /* ----------------------------
-     * Constructor / Destructor
-     * ---------------------------- */
-    Core(const std::string &db_name);
-    ~Core();
+    Core() {
+        db_ = std::make_unique<fossil_bluecrab_core_db_t>();
+        fossil_bluecrab_core_init(db_.get(), "./bluecrab_db");
+    }
 
-    /* ----------------------------
-     * Core Database Operations
-     * ---------------------------- */
-    bool init_db();
-    void destroy_db();
+    explicit Core(const std::string& path) {
+        db_ = std::make_unique<fossil_bluecrab_core_db_t>();
+        fossil_bluecrab_core_init(db_.get(), path.c_str());
+    }
 
-    bool set(const std::string &key, const fossil_bluecrab_core_data_t &value);
-    bool get(const std::string &key, fossil_bluecrab_core_data_t &out_value);
-    bool delete_record(const std::string &key);
-    std::vector<std::string> list_keys();
+    ~Core() {
+        fossil_bluecrab_core_shutdown(db_.get());
+    }
 
-    /* ----------------------------
-     * Persistent Storage
-     * ---------------------------- */
-    bool save(const std::string &filepath);
-    bool load(const std::string &filepath);
+    /* =========================================================================
+     * CRUD Operations
+     * ======================================================================== */
+    bool set(const std::string& key, const fossil_bluecrab_core_value_t& value) {
+        return fossil_bluecrab_core_set(db_.get(), key.c_str(), value);
+    }
 
-    /* ----------------------------
-     * Tamper Protection
-     * ---------------------------- */
-    uint64_t hash_record(fossil_bluecrab_core_record_t *record);
-    bool verify_integrity();
+    std::optional<fossil_bluecrab_core_value_t> get(const std::string& key) {
+        fossil_bluecrab_core_value_t value;
+        if (fossil_bluecrab_core_get(db_.get(), key.c_str(), &value)) {
+            return value;
+        }
+        return std::nullopt;
+    }
 
-    /* ----------------------------
-     * Git-Inspired Operations
-     * ---------------------------- */
-    bool commit(const std::string &message);
-    bool rollback(const std::string &commit_hash);
-    void log();
+    bool remove(const std::string& key) {
+        return fossil_bluecrab_core_delete(db_.get(), key.c_str());
+    }
 
-    /* ----------------------------
-     * Utility / AI Tricks
-     * ---------------------------- */
-    void print_record(fossil_bluecrab_core_record_t *record);
-    fossil_bluecrab_core_type_t infer_type(void *data, size_t size);
-    std::time_t current_time();
+    /* =========================================================================
+     * Git-like Operations
+     * ======================================================================== */
+    bool commit(const std::string& message) {
+        return fossil_bluecrab_core_commit(db_.get(), message.c_str());
+    }
+
+    bool checkout(const std::string& commit_hash) {
+        return fossil_bluecrab_core_checkout(db_.get(), commit_hash.c_str());
+    }
+
+    bool branch(const std::string& branch_name) {
+        return fossil_bluecrab_core_branch(db_.get(), branch_name.c_str());
+    }
+
+    bool log() {
+        return fossil_bluecrab_core_log(db_.get());
+    }
+
+    /* =========================================================================
+     * Utility / Hash
+     * ======================================================================== */
+    std::string hash_entry(const fossil_bluecrab_core_entry_t& entry) {
+        char* h = fossil_bluecrab_core_hash_entry(&entry);
+        std::string hash = h ? h : "";
+        free(h); // C function allocates memory
+        return hash;
+    }
+
+    std::string type_to_string(fossil_bluecrab_core_type_t type) const {
+        return fossil_bluecrab_core_type_to_string(type);
+    }
+
+    fossil_bluecrab_core_type_t string_to_type(const std::string& type_str) const {
+        return fossil_bluecrab_core_string_to_type(type_str.c_str());
+    }
 
 private:
-    fossil_bluecrab_core_db_t db_; // The underlying C database handle
-    std::string db_name_;
+    std::unique_ptr<fossil_bluecrab_core_db_t> db_;
 };
 
 } // namespace bluecrab
