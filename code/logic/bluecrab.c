@@ -560,6 +560,74 @@ static fossil_bluecrab_core_entry_t *copy_entry(const fossil_bluecrab_core_entry
 /* ============================================================================
  * Query / Search Operations (NoSQL-style)
  * ============================================================================ */
+static fossil_bluecrab_core_commit_t *
+bluecrab_find_commit(fossil_bluecrab_core_db_t *db, const char *hash) {
+    if (!db || !hash) return NULL;
+
+    for (size_t i = 0; i < db->commit_count; i++) {
+        if (db->commits[i].hash &&
+            strcmp(db->commits[i].hash, hash) == 0) {
+            return &db->commits[i];
+        }
+    }
+    return NULL;
+}
+
+static fossil_bluecrab_core_entry_t *
+bluecrab_find_entry(fossil_bluecrab_core_db_t *db, const char *key) {
+    if (!db || !key) return NULL;
+
+    for (size_t i = 0; i < db->entry_count; i++) {
+        if (db->entries[i].key && strcmp(db->entries[i].key, key) == 0) {
+            return &db->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static fossil_bluecrab_core_entry_t *
+copy_entries(fossil_bluecrab_core_db_t *db, size_t *out_count) {
+    if (!db || db->entry_count == 0) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    fossil_bluecrab_core_entry_t *copy =
+        calloc(db->entry_count, sizeof(*copy));
+    if (!copy) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+
+    for (size_t i = 0; i < db->entry_count; i++) {
+        fossil_bluecrab_core_entry_t *src = &db->entries[i];
+        fossil_bluecrab_core_entry_t *dst = &copy[i];
+
+        dst->key = src->key ? fossil_bluecrab_core_strdup(src->key) : NULL;
+        dst->value = fossil_bluecrab_core_value_copy(&src->value);
+        dst->created_at = src->created_at;
+        dst->updated_at = src->updated_at;
+        dst->metadata = src->metadata ? fossil_bluecrab_core_strdup(src->metadata) : NULL;
+        dst->hash = src->hash ? fossil_bluecrab_core_strdup(src->hash) : NULL;
+    }
+
+    if (out_count) *out_count = db->entry_count;
+    return copy;
+}
+
+static void
+free_entries(fossil_bluecrab_core_entry_t *entries, size_t count) {
+    if (!entries) return;
+
+    for (size_t i = 0; i < count; i++) {
+        free(entries[i].key);
+        fossil_bluecrab_core_value_free(&entries[i].value);
+        free(entries[i].metadata);
+        free(entries[i].hash);
+    }
+    free(entries);
+}
+
 size_t fossil_bluecrab_core_find_keys(fossil_bluecrab_core_db_t *db,
                                       const char *pattern,
                                       char ***out_keys) {
