@@ -185,6 +185,75 @@ bool fossil_bluecrab_core_save(fossil_bluecrab_core_db_t *db);
 bool fossil_bluecrab_core_load(fossil_bluecrab_core_db_t *db);
 
 /* ============================================================================
+ * Query / Search Operations (NoSQL-style)
+ * ============================================================================ */
+size_t fossil_bluecrab_core_find_keys(fossil_bluecrab_core_db_t *db,
+                                      const char *pattern,
+                                      char ***out_keys);
+
+size_t fossil_bluecrab_core_find_entries(fossil_bluecrab_core_db_t *db,
+                                         const char *pattern,
+                                         fossil_bluecrab_core_entry_t **out_entries);
+
+bool fossil_bluecrab_core_clear(fossil_bluecrab_core_db_t *db); // Remove all entries
+
+/* ============================================================================
+ * Merge / Diff Operations (Git-style)
+ * ============================================================================ */
+bool fossil_bluecrab_core_diff(fossil_bluecrab_core_db_t *db,
+                               const char *commit_a,
+                               const char *commit_b);
+
+bool fossil_bluecrab_core_merge(fossil_bluecrab_core_db_t *db,
+                                const char *source_commit,
+                                const char *target_commit,
+                                bool auto_resolve_conflicts);
+
+/* ============================================================================
+ * Tagging / Bookmarking Commits
+ * ============================================================================ */
+bool fossil_bluecrab_core_tag_commit(fossil_bluecrab_core_db_t *db,
+                                     const char *commit_hash,
+                                     const char *tag_name);
+
+char *fossil_bluecrab_core_get_tagged_commit(fossil_bluecrab_core_db_t *db,
+                                             const char *tag_name);
+
+/* ============================================================================
+ * Export / Import Operations
+ * ============================================================================ */
+bool fossil_bluecrab_core_export_fson(fossil_bluecrab_core_db_t *db,
+                                      const char *filepath);
+
+bool fossil_bluecrab_core_import_fson(fossil_bluecrab_core_db_t *db,
+                                      const char *filepath);
+
+/* ============================================================================
+ * Entry Metadata / Extended Utilities
+ * ============================================================================ */
+bool fossil_bluecrab_core_set_metadata(fossil_bluecrab_core_db_t *db,
+                                       const char *key,
+                                       const char *metadata);
+
+char *fossil_bluecrab_core_get_metadata(fossil_bluecrab_core_db_t *db,
+                                        const char *key);
+
+bool fossil_bluecrab_core_has_key(fossil_bluecrab_core_db_t *db,
+                                  const char *key);
+
+/* ============================================================================
+ * Advanced Hash / Tamper Detection
+ * ============================================================================ */
+bool fossil_bluecrab_core_verify_entry(fossil_bluecrab_core_entry_t *entry);
+bool fossil_bluecrab_core_verify_db(fossil_bluecrab_core_db_t *db);
+
+/* ============================================================================
+ * Utility / Debug
+ * ============================================================================ */
+void fossil_bluecrab_core_print_entry(fossil_bluecrab_core_entry_t *entry);
+void fossil_bluecrab_core_print_db(fossil_bluecrab_core_db_t *db);
+
+/* ============================================================================
  * Utility Functions
  * ============================================================================ */
 char *fossil_bluecrab_core_hash_entry(const fossil_bluecrab_core_entry_t *entry);
