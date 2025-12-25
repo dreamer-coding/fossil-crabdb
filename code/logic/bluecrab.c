@@ -129,14 +129,112 @@ void fossil_bluecrab_core_value_free(fossil_bluecrab_core_value_t *value) {
  * Hashing: Simple placeholder hash for entries (for tamper protection)
  * ============================================================================ */
 char *fossil_bluecrab_core_hash_entry(const fossil_bluecrab_core_entry_t *entry) {
-    if (!entry) return NULL;
-    /* Very simple hash: sum of chars mod 256 as hex string (placeholder) */
-    unsigned int sum = 0;
-    for (size_t i = 0; entry->key[i]; i++) sum += (unsigned char)entry->key[i];
-    char *hash = malloc(9);
-    if (!hash) return NULL;
-    snprintf(hash, 9, "%08X", sum);
-    return hash;
+    if (!entry || !entry->key) return NULL;
+
+    /* 64-bit FNV-1a base */
+    uint64_t hash = 1469598103934665603ULL;
+
+    /* Mix helper */
+    #define MIX_BYTE(b) do { \
+        hash ^= (uint64_t)(unsigned char)(b); \
+        hash *= 1099511628211ULL; \
+    } while (0)
+
+    /* Key */
+    for (const char *p = entry->key; *p; ++p)
+        MIX_BYTE(*p);
+
+    /* Type */
+    MIX_BYTE(entry->value.type & 0xFF);
+    MIX_BYTE((entry->value.type >> 8) & 0xFF);
+
+    /* Value (type-aware) */
+    switch (entry->value.type) {
+        case FBC_TYPE_I8:   MIX_BYTE(entry->value.value.i8); break;
+        case FBC_TYPE_I16:  for (int i = 0; i < 2; i++) MIX_BYTE(entry->value.value.i16 >> (i * 8)); break;
+        case FBC_TYPE_I32:  for (int i = 0; i < 4; i++) MIX_BYTE(entry->value.value.i32 >> (i * 8)); break;
+        case FBC_TYPE_I64:  for (int i = 0; i < 8; i++) MIX_BYTE(entry->value.value.i64 >> (i * 8)); break;
+
+        case FBC_TYPE_U8:   MIX_BYTE(entry->value.value.u8); break;
+        case FBC_TYPE_U16:  for (int i = 0; i < 2; i++) MIX_BYTE(entry->value.value.u16 >> (i * 8)); break;
+        case FBC_TYPE_U32:  for (int i = 0; i < 4; i++) MIX_BYTE(entry->value.value.u32 >> (i * 8)); break;
+        case FBC_TYPE_U64:  for (int i = 0; i < 8; i++) MIX_BYTE(entry->value.value.u64 >> (i * 8)); break;
+
+        case FBC_TYPE_F32: {
+            uint32_t v;
+            memcpy(&v, &entry->value.value.f32, sizeof(v));
+            for (int i = 0; i < 4; i++) MIX_BYTE(v >> (i * 8));
+            break;
+        }
+
+        case FBC_TYPE_F64: {
+            uint64_t v;
+            memcpy(&v, &entry->value.value.f64, sizeof(v));
+            for (int i = 0; i < 8; i++) MIX_BYTE(v >> (i * 8));
+            break;
+        }
+
+        case FBC_TYPE_CSTR:
+            if (entry->value.value.cstr)
+                for (const char *p = entry->value.value.cstr; *p; ++p)
+                    MIX_BYTE(*p);
+            break;
+
+        case FBC_TYPE_CHAR:
+            MIX_BYTE(entry->value.value.ch);
+            break;
+
+        case FBC_TYPE_BOOL:
+            MIX_BYTE(entry->value.value.boolean ? 1 : 0);
+            break;
+
+        case FBC_TYPE_SIZE:
+            for (int i = 0; i < sizeof(size_t); i++)
+                MIX_BYTE(entry->value.value.size >> (i * 8));
+            break;
+
+        case FBC_TYPE_DATETIME:
+            for (int i = 0; i < sizeof(time_t); i++)
+                MIX_BYTE(entry->value.value.datetime >> (i * 8));
+            break;
+
+        case FBC_TYPE_DURATION: {
+            uint64_t v;
+            memcpy(&v, &entry->value.value.duration, sizeof(v));
+            for (int i = 0; i < 8; i++) MIX_BYTE(v >> (i * 8));
+            break;
+        }
+
+        default:
+            break;
+    }
+
+    /* Metadata */
+    if (entry->metadata) {
+        for (const char *p = entry->metadata; *p; ++p)
+            MIX_BYTE(*p);
+    }
+
+    /* Timestamps */
+    for (int i = 0; i < sizeof(time_t); i++)
+        MIX_BYTE(entry->created_at >> (i * 8));
+
+    for (int i = 0; i < sizeof(time_t); i++)
+        MIX_BYTE(entry->updated_at >> (i * 8));
+
+    /* Final avalanche */
+    hash ^= hash >> 33;
+    hash *= 0xff51afd7ed558ccdULL;
+    hash ^= hash >> 33;
+    hash *= 0xc4ceb9fe1a85ec53ULL;
+    hash ^= hash >> 33;
+
+    /* Hex output (64-bit = 16 hex chars) */
+    char *out = malloc(17);
+    if (!out) return NULL;
+
+    snprintf(out, 17, "%016llX", (unsigned long long)hash);
+    return out;
 }
 
 /* ============================================================================
@@ -356,36 +454,105 @@ bool fossil_bluecrab_core_branch(fossil_bluecrab_core_db_t *db, const char *bran
     return true;
 }
 
-bool fossil_bluecrab_core_log(fossil_bluecrab_core_db_t *db) {
-    if (!db) return false;
-    printf("[BlueCrab] Branch: %s, Current commit: %s\n",
-           db->branch ? db->branch : "none",
-           db->current_commit ? db->current_commit : "none");
-
-    for (size_t i = 0; i < db->commit_count; i++) {
-        printf("  %s - %s (%ld)\n",
-               db->commits[i].hash,
-               db->commits[i].message,
-               db->commits[i].timestamp);
-    }
-    return true;
-}
-
 /* ============================================================================
  * Utility Functions
  * ============================================================================ */
 static bool string_matches_pattern(const char *str, const char *pattern) {
     if (!str || !pattern) return false;
-    return strstr(str, pattern) != NULL; // simple substring match
+
+    bool case_insensitive = false;
+
+    /* Optional (?i) prefix */
+    if (strncmp(pattern, "(?i)", 4) == 0) {
+        case_insensitive = true;
+        pattern += 4;
+    }
+
+    /* Helpers */
+    #define CH_EQ(a, b) \
+        (case_insensitive ? (tolower((unsigned char)(a)) == tolower((unsigned char)(b))) : ((a) == (b)))
+
+    /* Prefix match ^foo */
+    if (pattern[0] == '^') {
+        pattern++;
+        while (*pattern && *str) {
+            if (!CH_EQ(*str++, *pattern++))
+                return false;
+        }
+        return *pattern == '\0';
+    }
+
+    /* Suffix match bar$ */
+    size_t plen = strlen(pattern);
+    if (plen > 0 && pattern[plen - 1] == '$') {
+        pattern = strndup(pattern, plen - 1);
+        size_t slen = strlen(str);
+
+        if (slen < plen - 1) return false;
+
+        const char *tail = str + (slen - (plen - 1));
+        while (*pattern) {
+            if (!CH_EQ(*tail++, *pattern++))
+                return false;
+        }
+        return true;
+    }
+
+    /* Wildcard match foo*bar */
+    const char *star = strchr(pattern, '*');
+    if (star) {
+        size_t head_len = star - pattern;
+        size_t tail_len = strlen(star + 1);
+
+        /* Head */
+        for (size_t i = 0; i < head_len; i++) {
+            if (!str[i] || !CH_EQ(str[i], pattern[i]))
+                return false;
+        }
+
+        /* Tail */
+        if (tail_len == 0)
+            return true;
+
+        size_t slen = strlen(str);
+        if (slen < head_len + tail_len)
+            return false;
+
+        const char *tail = str + slen - tail_len;
+        const char *pat_tail = star + 1;
+
+        while (*pat_tail) {
+            if (!CH_EQ(*tail++, *pat_tail++))
+                return false;
+        }
+
+        return true;
+    }
+
+    /* Default: substring search (case-aware) */
+    for (const char *s = str; *s; s++) {
+        const char *a = s;
+        const char *b = pattern;
+
+        while (*a && *b && CH_EQ(*a, *b)) {
+            a++;
+            b++;
+        }
+
+        if (*b == '\0')
+            return true;
+    }
+
+    return false;
 }
 
 static fossil_bluecrab_core_entry_t *copy_entry(const fossil_bluecrab_core_entry_t *entry) {
     fossil_bluecrab_core_entry_t *e = malloc(sizeof(fossil_bluecrab_core_entry_t));
-    e->key = strdup(entry->key);
+    e->key = fossil_bluecrab_core_strdup(entry->key);
     e->value = fossil_bluecrab_core_value_copy(&entry->value);
     e->created_at = entry->created_at;
     e->updated_at = entry->updated_at;
-    e->metadata = entry->metadata ? strdup(entry->metadata) : NULL;
+    e->metadata = entry->metadata ? fossil_bluecrab_core_strdup(entry->metadata) : NULL;
     e->hash = entry->hash ? strdup(entry->hash) : NULL;
     return e;
 }
@@ -406,7 +573,7 @@ size_t fossil_bluecrab_core_find_keys(fossil_bluecrab_core_db_t *db,
     size_t j = 0;
     for (size_t i = 0; i < db->entry_count; i++) {
         if (string_matches_pattern(db->entries[i].key, pattern))
-            (*out_keys)[j++] = strdup(db->entries[i].key);
+            (*out_keys)[j++] = fossil_bluecrab_core_strdup(db->entries[i].key);
     }
     return count;
 }
@@ -450,8 +617,42 @@ bool fossil_bluecrab_core_diff(fossil_bluecrab_core_db_t *db,
                                const char *commit_a,
                                const char *commit_b) {
     if (!db || !commit_a || !commit_b) return false;
-    printf("[BlueCrab] Diff between %s and %s (placeholder)\n", commit_a, commit_b);
-    return true; // placeholder: implement actual diff logic
+
+    fossil_bluecrab_core_commit_t *a = bluecrab_find_commit(db, commit_a);
+    fossil_bluecrab_core_commit_t *b = bluecrab_find_commit(db, commit_b);
+
+    if (!a || !b) {
+        printf("[BlueCrab][diff] Commit not found\n");
+        return false;
+    }
+
+    printf("[BlueCrab][diff] %s → %s\n", commit_a, commit_b);
+
+    /* Removed or modified */
+    for (size_t i = 0; i < a->snapshot_count; i++) {
+        fossil_bluecrab_core_entry_t *ea = &a->snapshot[i];
+        fossil_bluecrab_core_entry_t *eb =
+            bluecrab_find_entry(b->snapshot, b->snapshot_count, ea->key);
+
+        if (!eb) {
+            printf("  - removed: %s\n", ea->key);
+        } else if (strcmp(ea->hash, eb->hash) != 0) {
+            printf("  ~ modified: %s\n", ea->key);
+        }
+    }
+
+    /* Added */
+    for (size_t i = 0; i < b->snapshot_count; i++) {
+        fossil_bluecrab_core_entry_t *eb = &b->snapshot[i];
+        fossil_bluecrab_core_entry_t *ea =
+            bluecrab_find_entry(a->snapshot, a->snapshot_count, eb->key);
+
+        if (!ea) {
+            printf("  + added: %s\n", eb->key);
+        }
+    }
+
+    return true;
 }
 
 bool fossil_bluecrab_core_merge(fossil_bluecrab_core_db_t *db,
@@ -459,9 +660,56 @@ bool fossil_bluecrab_core_merge(fossil_bluecrab_core_db_t *db,
                                 const char *target_commit,
                                 bool auto_resolve_conflicts) {
     if (!db || !source_commit || !target_commit) return false;
-    printf("[BlueCrab] Merge %s into %s (auto_resolve=%d, placeholder)\n",
-           source_commit, target_commit, auto_resolve_conflicts);
-    return true; // placeholder: implement merge logic
+
+    fossil_bluecrab_core_commit_t *src =
+        bluecrab_find_commit(db, source_commit);
+    fossil_bluecrab_core_commit_t *dst =
+        bluecrab_find_commit(db, target_commit);
+
+    if (!src || !dst) {
+        printf("[BlueCrab][merge] Commit not found\n");
+        return false;
+    }
+
+    printf("[BlueCrab][merge] %s → %s\n", source_commit, target_commit);
+
+    /* Start from target snapshot */
+    fossil_bluecrab_core_clear(db);
+    for (size_t i = 0; i < dst->snapshot_count; i++) {
+        fossil_bluecrab_core_set(db,
+                                 dst->snapshot[i].key,
+                                 fossil_bluecrab_core_value_copy(
+                                     &dst->snapshot[i].value));
+    }
+
+    /* Apply source changes */
+    for (size_t i = 0; i < src->snapshot_count; i++) {
+        fossil_bluecrab_core_entry_t *se = &src->snapshot[i];
+        fossil_bluecrab_core_entry_t *te =
+            bluecrab_find_entry(dst->snapshot, dst->snapshot_count, se->key);
+
+        if (!te) {
+            /* New key */
+            fossil_bluecrab_core_set(db,
+                                     se->key,
+                                     fossil_bluecrab_core_value_copy(&se->value));
+            printf("  + merged: %s\n", se->key);
+        } else if (strcmp(se->hash, te->hash) != 0) {
+            /* Conflict */
+            if (!auto_resolve_conflicts) {
+                printf("  ! conflict: %s (merge aborted)\n", se->key);
+                return false;
+            }
+
+            fossil_bluecrab_core_set(db,
+                                     se->key,
+                                     fossil_bluecrab_core_value_copy(&se->value));
+            printf("  ~ conflict resolved (source): %s\n", se->key);
+        }
+    }
+
+    fossil_bluecrab_core_commit(db, "merge commit");
+    return true;
 }
 
 /* ============================================================================
@@ -481,8 +729,8 @@ bool fossil_bluecrab_core_tag_commit(fossil_bluecrab_core_db_t *db,
     if (!db || !commit_hash || !tag_name) return false;
 
     fossil_bluecrab_core_tag_t *t = malloc(sizeof(fossil_bluecrab_core_tag_t));
-    t->name = strdup(tag_name);
-    t->commit_hash = strdup(commit_hash);
+    t->name = fossil_bluecrab_core_strdup(tag_name);
+    t->commit_hash = fossil_bluecrab_core_strdup(commit_hash);
     t->next = tag_head;
     tag_head = t;
 
