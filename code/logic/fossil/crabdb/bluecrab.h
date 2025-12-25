@@ -129,33 +129,26 @@ typedef struct {
     } value;
 } fossil_bluecrab_core_value_t;
 
-/* ============================================================================
- * Database Entry
- * ---------------------------------------------------------------------------
- * Each entry has a key, value, timestamp, and optional metadata
- * ============================================================================ */
 typedef struct {
-    char *key;
-    fossil_bluecrab_core_value_t value;
-    time_t created_at;
-    time_t updated_at;
-    char *metadata; /* Optional JSON or string metadata */
-    char *hash;     /* Cold-core tamper protection hash */
-} fossil_bluecrab_core_entry_t;
+    char *hash;       // Commit hash (simple placeholder or SHA256)
+    char *message;    // Commit message
+    time_t timestamp; // Commit time
+    fossil_bluecrab_core_entry_t *snapshot; // Deep copy of entries
+    size_t snapshot_count;
+} fossil_bluecrab_core_commit_t;
 
-/* ============================================================================
- * Database Object
- * ---------------------------------------------------------------------------
- * Core database structure with Git-like versioning
- * ============================================================================ */
 typedef struct {
-    char *db_path; /* File system path for persistence */
+    char *db_path;
     size_t entry_count;
     fossil_bluecrab_core_entry_t *entries;
 
-    /* Git-like versioning information */
+    /* Git-like versioning */
     char *current_commit;
     char *branch;
+
+    /* Commit history */
+    fossil_bluecrab_core_commit_t *commits;
+    size_t commit_count;
 } fossil_bluecrab_core_db_t;
 
 /* ============================================================================
